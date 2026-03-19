@@ -24,6 +24,9 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    python3 \
+    python3-pip \
+    && pip3 install --no-cache-dir --break-system-packages rapidfuzz cryptography \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
