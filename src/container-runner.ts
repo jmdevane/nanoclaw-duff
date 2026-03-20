@@ -41,6 +41,8 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  allowedTools?: string[];
+  maxTurns?: number;
 }
 
 export interface ContainerOutput {
@@ -318,7 +320,14 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    container.stdin.write(JSON.stringify(input));
+    // Merge per-group containerConfig overrides (allowedTools, maxTurns) into input.
+    // Caller-provided values take precedence; group config fills in unset fields.
+    const enrichedInput: ContainerInput = {
+      ...input,
+      allowedTools: input.allowedTools ?? group.containerConfig?.allowedTools,
+      maxTurns: input.maxTurns ?? group.containerConfig?.maxTurns,
+    };
+    container.stdin.write(JSON.stringify(enrichedInput));
     container.stdin.end();
 
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive

@@ -55,6 +55,8 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { handleSlashCommand } from './slash-commands.js';
+import { classifyIntent, DEFLECTION_MESSAGE } from './intent-gate.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -191,6 +193,30 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     'Processing messages',
   );
 
+  // Slash command short-circuit — handle before intent gate or container spawn.
+  // Only applies to non-main groups; main group gets natural language for everything.
+  if (!isMainGroup) {
+    const slashResponse = await handleSlashCommand(missedMessages, group);
+    if (slashResponse !== null) {
+      await channel.sendMessage(chatJid, slashResponse);
+      return true;
+    }
+  }
+
+  // Intent gate — classify message before spawning a container.
+  // Class C (off-topic) gets a fixed deflection; A/B proceed to agent.
+  // Only applies to non-main groups.
+  if (!isMainGroup) {
+    const lastUserContent = [...missedMessages]
+      .reverse()
+      .find((m) => !m.is_bot_message)?.content ?? '';
+    const intent = await classifyIntent(lastUserContent);
+    if (intent === 'C') {
+      await channel.sendMessage(chatJid, DEFLECTION_MESSAGE);
+      return true;
+    }
+  }
+
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -233,7 +259,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             : JSON.stringify(result.result);
         // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
         const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+        logger.info(
+          { group: group.name },
+          `Agent output: ${raw.slice(0, 200)}`,
+        );
         if (text) {
           await channel.sendMessage(chatJid, text);
           outputSentToUser = true;
