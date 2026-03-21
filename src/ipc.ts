@@ -6,7 +6,13 @@ import { CronExpressionParser } from 'cron-parser';
 import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask, writeTokenUsage } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getTaskById,
+  updateTask,
+  writeTokenUsage,
+} from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -75,17 +81,23 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'token_usage' && data.groupFolder && Array.isArray(data.models)) {
+              if (
+                data.type === 'token_usage' &&
+                data.groupFolder &&
+                Array.isArray(data.models)
+              ) {
                 // No authorization needed — groupFolder is derived from the IPC directory,
                 // not from the message payload, so it can't be spoofed by the container.
-                const rows = (data.models as Array<{
-                  model: string;
-                  inputTokens: number;
-                  outputTokens: number;
-                  cacheReadTokens: number;
-                  cacheWriteTokens: number;
-                  costUsd: number;
-                }>).map((m) => ({
+                const rows = (
+                  data.models as Array<{
+                    model: string;
+                    inputTokens: number;
+                    outputTokens: number;
+                    cacheReadTokens: number;
+                    cacheWriteTokens: number;
+                    costUsd: number;
+                  }>
+                ).map((m) => ({
                   groupFolder: sourceGroup, // use verified directory identity
                   sessionId: data.sessionId as string | undefined,
                   model: m.model,

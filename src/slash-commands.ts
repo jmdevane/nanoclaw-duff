@@ -214,7 +214,10 @@ function handleUsage(): string {
     const cost = row.cost_usd.toFixed(4);
     const inK = (row.input_tokens / 1000).toFixed(1);
     const outK = (row.output_tokens / 1000).toFixed(1);
-    const cacheK = ((row.cache_read_tokens + row.cache_write_tokens) / 1000).toFixed(1);
+    const cacheK = (
+      (row.cache_read_tokens + row.cache_write_tokens) /
+      1000
+    ).toFixed(1);
     lines.push(
       `• *${row.group_folder}* — $${cost} (${inK}K in / ${outK}K out / ${cacheK}K cache, ${row.query_count} queries)`,
     );
