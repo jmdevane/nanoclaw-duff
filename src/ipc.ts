@@ -3,7 +3,7 @@ import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
 
-import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
@@ -13,6 +13,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendFile: (jid: string, filePath: string, caption?: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -74,14 +75,21 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              if (data.type === 'message' && data.chatJid && (data.text || data.file_path)) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  if (data.sender && data.chatJid.startsWith('tg:')) {
+                  if (data.file_path) {
+                    // Translate container path to host path
+                    const CONTAINER_GROUP_PREFIX = '/workspace/group/';
+                    const hostFilePath = data.file_path.startsWith(CONTAINER_GROUP_PREFIX)
+                      ? path.join(GROUPS_DIR, sourceGroup, data.file_path.slice(CONTAINER_GROUP_PREFIX.length))
+                      : data.file_path;
+                    await deps.sendFile(data.chatJid, hostFilePath, data.text || undefined);
+                  } else if (data.sender && data.chatJid.startsWith('tg:')) {
                     await sendPoolMessage(
                       data.chatJid,
                       data.text,
@@ -92,7 +100,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     await deps.sendMessage(data.chatJid, data.text);
                   }
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
+                    { chatJid: data.chatJid, sourceGroup, sender: data.sender, hasFile: !!data.file_path },
                     'IPC message sent',
                   );
                 } else {

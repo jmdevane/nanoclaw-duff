@@ -75,7 +75,9 @@ function ledgerPath(group: RegisteredGroup): string {
 
 function kernelPath(): string {
   const env = readEnvFile(['SOLOLEDGER_KERNEL_PATH']);
-  return env.SOLOLEDGER_KERNEL_PATH || path.resolve(process.cwd(), '..', 'kernel');
+  return (
+    env.SOLOLEDGER_KERNEL_PATH || path.resolve(process.cwd(), '..', 'kernel')
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -130,14 +132,16 @@ function handleStatus(group: RegisteredGroup): string {
   try {
     db = new Database(dbFile, { readonly: true });
     const { cnt } = db
-      .prepare<[], { cnt: number }>(
-        "SELECT COUNT(*) AS cnt FROM transactions WHERE status = 'uncategorized'",
-      )
+      .prepare<
+        [],
+        { cnt: number }
+      >("SELECT COUNT(*) AS cnt FROM transactions WHERE status = 'uncategorized'")
       .get()!;
     const row = db
-      .prepare<[], { last_date: string | null }>(
-        'SELECT MAX(date) AS last_date FROM transactions',
-      )
+      .prepare<
+        [],
+        { last_date: string | null }
+      >('SELECT MAX(transaction_date) AS last_date FROM transactions')
       .get()!;
     const lastDate = row.last_date ?? 'no transactions yet';
     if (cnt === 0) {
@@ -164,13 +168,7 @@ async function handleReport(
     cashflow: 'cashflow',
     cf: 'cashflow',
   };
-  const sub = subMap[subcommand?.toLowerCase() ?? ''];
-  if (!sub) {
-    return (
-      'Usage: `/report p&l` | `/report bs` | `/report cashflow`\n' +
-      'Reports default to year-to-date.'
-    );
-  }
+  const sub = subMap[subcommand?.toLowerCase() ?? ''] ?? 'pnl';
   try {
     const output = await runKernel('report.py', [sub], group);
     return output ? '```\n' + output + '\n```' : 'No data for this period.';
@@ -202,11 +200,7 @@ async function handleAccounts(group: RegisteredGroup): Promise<string> {
 
 async function handleSync(group: RegisteredGroup): Promise<string> {
   try {
-    const output = await runKernel(
-      'ingest.py',
-      ['sync', group.folder],
-      group,
-    );
+    const output = await runKernel('ingest.py', ['sync', group.folder], group);
     return output || 'Sync complete.';
   } catch (err) {
     logger.warn({ group: group.name, err }, 'slash /sync: error');
@@ -235,9 +229,7 @@ export async function handleSlashCommand(
   group: RegisteredGroup,
 ): Promise<string | null> {
   // Find the last non-bot message
-  const lastUser = [...messages]
-    .reverse()
-    .find((m) => !m.is_bot_message);
+  const lastUser = [...messages].reverse().find((m) => !m.is_bot_message);
 
   if (!lastUser) return null;
 

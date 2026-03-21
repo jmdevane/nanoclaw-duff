@@ -454,6 +454,25 @@ async function runQuery(
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+
+      // Graceful cutoff message when maxTurns is reached
+      if (message.subtype === 'error_max_turns') {
+        const ipcMessagesDir = path.join(IPC_INPUT_DIR, '..', 'messages');
+        fs.mkdirSync(ipcMessagesDir, { recursive: true });
+        const filename = `${Date.now()}-maxturn.json`;
+        const tempPath = path.join(ipcMessagesDir, `${filename}.tmp`);
+        const finalPath = path.join(ipcMessagesDir, filename);
+        fs.writeFileSync(tempPath, JSON.stringify({
+          type: 'message',
+          chatJid: containerInput.chatJid,
+          text: "I've hit my turn limit for this session. Send another message to continue where we left off.",
+          groupFolder: containerInput.groupFolder,
+          timestamp: new Date().toISOString(),
+        }));
+        fs.renameSync(tempPath, finalPath);
+        log('maxTurns reached — graceful cutoff message queued');
+      }
+
       writeOutput({
         status: 'success',
         result: textResult || null,

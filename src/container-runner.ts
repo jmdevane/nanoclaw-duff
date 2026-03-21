@@ -177,29 +177,22 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Copy agent-runner source into a per-group writable location so agents
-  // can customize it (add tools, change behavior) without affecting other
-  // groups. Recompiled on container startup via entrypoint.sh.
-  const agentRunnerSrc = path.join(
+  // Mount pre-compiled agent-runner dist read-only into all containers.
+  // Compiled once on the host via build.sh — no per-group copy or recompilation.
+  // Node resolves /app/node_modules naturally since /app/dist is a subdirectory.
+  const agentRunnerDist = path.join(
     projectRoot,
     'container',
     'agent-runner',
-    'src',
+    'dist',
   );
-  const groupAgentRunnerDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    'agent-runner-src',
-  );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerDist)) {
+    mounts.push({
+      hostPath: agentRunnerDist,
+      containerPath: '/app/dist',
+      readonly: true,
+    });
   }
-  mounts.push({
-    hostPath: groupAgentRunnerDir,
-    containerPath: '/app/src',
-    readonly: false,
-  });
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
@@ -276,6 +269,24 @@ export async function runContainerAgent(
 
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
+
+  // Base + overlay CLAUDE.md: regenerate from CLAUDE_base.md + custom.md before each run.
+  // Only activates when CLAUDE_base.md exists (new provisioned groups).
+  // Existing groups with only CLAUDE.md are unaffected.
+  if (!input.isMain) {
+    const baseMdPath = path.join(groupDir, 'CLAUDE_base.md');
+    if (fs.existsSync(baseMdPath)) {
+      const customMdPath = path.join(groupDir, 'custom.md');
+      const base = fs.readFileSync(baseMdPath, 'utf8');
+      const custom = fs.existsSync(customMdPath)
+        ? fs.readFileSync(customMdPath, 'utf8').trim()
+        : '';
+      const combined = custom
+        ? `${base}\n\n## Custom Instructions\n\n${custom}`
+        : base;
+      fs.writeFileSync(path.join(groupDir, 'CLAUDE.md'), combined);
+    }
+  }
 
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
@@ -444,6 +455,53 @@ export async function runContainerAgent(
     container.on('close', (code) => {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
+
+      // Post-exit cleanup for non-main groups only.
+      if (!input.isMain) {
+        // 1. Ephemeral session cleanup: delete session-env/ so the next container
+        //    run starts with a fresh session. Stateful data lives in ledger.db, not history.
+        const projectsDir = path.join(
+          DATA_DIR,
+          'sessions',
+          group.folder,
+          '.claude',
+          'projects',
+        );
+        if (fs.existsSync(projectsDir)) {
+          for (const projectDir of fs.readdirSync(projectsDir)) {
+            const sessionEnvDir = path.join(
+              projectsDir,
+              projectDir,
+              'session-env',
+            );
+            if (fs.existsSync(sessionEnvDir)) {
+              fs.rmSync(sessionEnvDir, { recursive: true, force: true });
+              logger.debug(
+                { group: group.folder },
+                'Cleaned up session-env on container exit',
+              );
+            }
+          }
+        }
+
+        // 2. Temp file cleanup: delete report PNGs older than 7 days.
+        const reportsDir = path.join(groupDir, 'reports');
+        if (fs.existsSync(reportsDir)) {
+          const cutoffMs = Date.now() - 7 * 24 * 60 * 60 * 1000;
+          for (const file of fs.readdirSync(reportsDir)) {
+            if (!file.endsWith('.png')) continue;
+            const filePath = path.join(reportsDir, file);
+            try {
+              if (fs.statSync(filePath).mtimeMs < cutoffMs) {
+                fs.rmSync(filePath);
+                logger.debug({ file, group: group.folder }, 'Deleted old report PNG');
+              }
+            } catch {
+              // File may have been deleted already; ignore
+            }
+          }
+        }
+      }
 
       if (timedOut) {
         const ts = new Date().toISOString().replace(/[:.]/g, '-');

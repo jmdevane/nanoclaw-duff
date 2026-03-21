@@ -23,7 +23,7 @@ export type IntentClass = 'A' | 'B' | 'C';
 const MODEL = 'claude-haiku-4-5-20251001';
 const SYSTEM_PROMPT =
   'You are a classifier. Reply with exactly one letter.\n' +
-  'A = financial or bookkeeping query\n' +
+  'A = financial or bookkeeping query, including chart, report, or visualization requests\n' +
   'B = slash command or status request (starts with /)\n' +
   'C = unrelated to bookkeeping';
 
@@ -102,7 +102,10 @@ export async function classifyIntent(
       return result;
     }
     // Unexpected response — safe fallback
-    logger.warn({ result }, 'Intent gate: unexpected response, defaulting to A');
+    logger.warn(
+      { result },
+      'Intent gate: unexpected response, defaulting to A',
+    );
     return 'A';
   } catch (err) {
     // Network error or timeout — safe fallback, don't drop real queries

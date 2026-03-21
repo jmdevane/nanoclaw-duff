@@ -10,6 +10,14 @@ IMAGE_NAME="nanoclaw-agent"
 TAG="${1:-latest}"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 
+# Compile agent-runner TypeScript to dist/ first.
+# All containers mount this shared dist read-only at /app/dist — no per-group recompilation.
+echo "Compiling agent-runner TypeScript..."
+cd "$SCRIPT_DIR/agent-runner"
+npm install --silent
+npm run build
+cd "$SCRIPT_DIR"
+
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 

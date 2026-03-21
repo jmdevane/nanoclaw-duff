@@ -41,9 +41,9 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  "Send a message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times.",
+  "Send a text message to the user or group immediately while you're still running. Use this for progress updates or to send multiple messages. You can call this multiple times. For images or files, use send_file instead.",
   {
-    text: z.string().describe('The message text to send'),
+    text: z.string().describe('The message text to send.'),
     sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
   },
   async (args) => {
@@ -59,6 +59,29 @@ server.tool(
     writeIpcFile(MESSAGES_DIR, data);
 
     return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
+  },
+);
+
+server.tool(
+  'send_file',
+  "Send an image or file to the user. Use this for charts and other generated files. The file renders inline in the conversation — do NOT use send_message to share a file path.",
+  {
+    file_path: z.string().describe('Absolute path to the file to send (e.g. /workspace/group/reports/chart.png)'),
+    caption: z.string().optional().describe('Optional caption shown below the image'),
+  },
+  async (args) => {
+    const data = {
+      type: 'message',
+      chatJid,
+      text: args.caption || '',
+      file_path: args.file_path,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+
+    writeIpcFile(MESSAGES_DIR, data);
+
+    return { content: [{ type: 'text' as const, text: 'File sent.' }] };
   },
 );
 

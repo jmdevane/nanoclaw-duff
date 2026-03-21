@@ -207,9 +207,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Class C (off-topic) gets a fixed deflection; A/B proceed to agent.
   // Only applies to non-main groups.
   if (!isMainGroup) {
-    const lastUserContent = [...missedMessages]
-      .reverse()
-      .find((m) => !m.is_bot_message)?.content ?? '';
+    const lastUserContent =
+      [...missedMessages].reverse().find((m) => !m.is_bot_message)?.content ??
+      '';
     const intent = await classifyIntent(lastUserContent);
     if (intent === 'C') {
       await channel.sendMessage(chatJid, DEFLECTION_MESSAGE);
@@ -615,6 +615,16 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       return channel.sendMessage(jid, text);
+    },
+    sendFile: async (jid, filePath, caption) => {
+      const channel = findChannel(channels, jid);
+      if (!channel) throw new Error(`No channel for JID: ${jid}`);
+      if (channel.sendFile) {
+        await channel.sendFile(jid, filePath, caption);
+      } else {
+        // Channel doesn't support file sending — fall back to caption as text
+        if (caption) await channel.sendMessage(jid, caption);
+      }
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

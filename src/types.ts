@@ -29,9 +29,9 @@ export interface AllowedRoot {
 
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
-  timeout?: number;        // Default: 300000 (5 minutes)
+  timeout?: number; // Default: 300000 (5 minutes)
   allowedTools?: string[]; // Restrict tool surface for non-main groups (token savings + safety)
-  maxTurns?: number;       // Cap agent turns per session (8 for customer groups, unlimited for main)
+  maxTurns?: number; // Cap agent turns per session (8 for customer groups, unlimited for main)
 }
 
 export interface RegisteredGroup {
@@ -85,6 +85,7 @@ export interface Channel {
   name: string;
   connect(): Promise<void>;
   sendMessage(jid: string, text: string): Promise<void>;
+  sendFile?(jid: string, filePath: string, caption?: string): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
