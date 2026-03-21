@@ -73,6 +73,19 @@ function createSchema(database: Database.Database): void {
       group_folder TEXT PRIMARY KEY,
       session_id TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS token_usage (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder         TEXT    NOT NULL,
+      session_id           TEXT,
+      model                TEXT    NOT NULL,
+      input_tokens         INTEGER NOT NULL DEFAULT 0,
+      output_tokens        INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens    INTEGER NOT NULL DEFAULT 0,
+      cache_write_tokens   INTEGER NOT NULL DEFAULT 0,
+      cost_usd             REAL    NOT NULL DEFAULT 0,
+      timestamp            TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_usage_group_time ON token_usage(group_folder, timestamp);
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -694,4 +707,90 @@ function migrateJsonState(): void {
       }
     }
   }
+}
+
+// --- Token usage ---
+
+export function writeTokenUsage(
+  rows: Array<{
+    groupFolder: string;
+    sessionId: string | undefined;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    costUsd: number;
+    timestamp: string;
+  }>,
+): void {
+  const stmt = db.prepare(
+    `INSERT INTO token_usage
+       (group_folder, session_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, timestamp)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const insertAll = db.transaction(
+    (
+      r: Array<{
+        groupFolder: string;
+        sessionId: string | undefined;
+        model: string;
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheWriteTokens: number;
+        costUsd: number;
+        timestamp: string;
+      }>,
+    ) => {
+      for (const row of r) {
+        stmt.run(
+          row.groupFolder,
+          row.sessionId ?? null,
+          row.model,
+          row.inputTokens,
+          row.outputTokens,
+          row.cacheReadTokens,
+          row.cacheWriteTokens,
+          row.costUsd,
+          row.timestamp,
+        );
+      }
+    },
+  );
+  insertAll(rows);
+}
+
+export function getUsageSummary(days = 30): Array<{
+  group_folder: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  query_count: number;
+}> {
+  return db
+    .prepare(
+      `SELECT group_folder,
+              SUM(input_tokens)       AS input_tokens,
+              SUM(output_tokens)      AS output_tokens,
+              SUM(cache_read_tokens)  AS cache_read_tokens,
+              SUM(cache_write_tokens) AS cache_write_tokens,
+              SUM(cost_usd)           AS cost_usd,
+              COUNT(*)                AS query_count
+       FROM token_usage
+       WHERE timestamp >= datetime('now', ?)
+       GROUP BY group_folder
+       ORDER BY cost_usd DESC`,
+    )
+    .all(`-${days} days`) as Array<{
+    group_folder: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    cost_usd: number;
+    query_count: number;
+  }>;
 }

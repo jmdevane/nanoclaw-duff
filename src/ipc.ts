@@ -6,7 +6,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DATA_DIR, GROUPS_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import { createTask, deleteTask, getTaskById, updateTask, writeTokenUsage } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -75,7 +75,37 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && (data.text || data.file_path)) {
+              if (data.type === 'token_usage' && data.groupFolder && Array.isArray(data.models)) {
+                // No authorization needed — groupFolder is derived from the IPC directory,
+                // not from the message payload, so it can't be spoofed by the container.
+                const rows = (data.models as Array<{
+                  model: string;
+                  inputTokens: number;
+                  outputTokens: number;
+                  cacheReadTokens: number;
+                  cacheWriteTokens: number;
+                  costUsd: number;
+                }>).map((m) => ({
+                  groupFolder: sourceGroup, // use verified directory identity
+                  sessionId: data.sessionId as string | undefined,
+                  model: m.model,
+                  inputTokens: m.inputTokens,
+                  outputTokens: m.outputTokens,
+                  cacheReadTokens: m.cacheReadTokens ?? 0,
+                  cacheWriteTokens: m.cacheWriteTokens ?? 0,
+                  costUsd: m.costUsd,
+                  timestamp: data.timestamp as string,
+                }));
+                writeTokenUsage(rows);
+                logger.debug(
+                  { group: sourceGroup, models: rows.map((r) => r.model) },
+                  'Token usage recorded',
+                );
+              } else if (
+                data.type === 'message' &&
+                data.chatJid &&
+                (data.text || data.file_path)
+              ) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
@@ -85,10 +115,20 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   if (data.file_path) {
                     // Translate container path to host path
                     const CONTAINER_GROUP_PREFIX = '/workspace/group/';
-                    const hostFilePath = data.file_path.startsWith(CONTAINER_GROUP_PREFIX)
-                      ? path.join(GROUPS_DIR, sourceGroup, data.file_path.slice(CONTAINER_GROUP_PREFIX.length))
+                    const hostFilePath = data.file_path.startsWith(
+                      CONTAINER_GROUP_PREFIX,
+                    )
+                      ? path.join(
+                          GROUPS_DIR,
+                          sourceGroup,
+                          data.file_path.slice(CONTAINER_GROUP_PREFIX.length),
+                        )
                       : data.file_path;
-                    await deps.sendFile(data.chatJid, hostFilePath, data.text || undefined);
+                    await deps.sendFile(
+                      data.chatJid,
+                      hostFilePath,
+                      data.text || undefined,
+                    );
                   } else if (data.sender && data.chatJid.startsWith('tg:')) {
                     await sendPoolMessage(
                       data.chatJid,
@@ -100,7 +140,12 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     await deps.sendMessage(data.chatJid, data.text);
                   }
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup, sender: data.sender, hasFile: !!data.file_path },
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      sender: data.sender,
+                      hasFile: !!data.file_path,
+                    },
                     'IPC message sent',
                   );
                 } else {

@@ -473,6 +473,42 @@ async function runQuery(
         log('maxTurns reached — graceful cutoff message queued');
       }
 
+      // Emit token usage to IPC so the host can record it in token_usage table.
+      // Uses SDK-computed costUSD per model — no local rate config needed.
+      if (message.subtype === 'success') {
+        const successMsg = message as {
+          modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number }>;
+        };
+        const modelUsage = successMsg.modelUsage ?? {};
+        const usageEntries = Object.entries(modelUsage);
+        if (usageEntries.length > 0) {
+          try {
+            const ipcDir = '/workspace/ipc/messages';
+            fs.mkdirSync(ipcDir, { recursive: true });
+            const filename = `${Date.now()}-usage.json`;
+            const tempPath = path.join(ipcDir, `${filename}.tmp`);
+            const finalPath = path.join(ipcDir, filename);
+            fs.writeFileSync(tempPath, JSON.stringify({
+              type: 'token_usage',
+              groupFolder: containerInput.groupFolder,
+              sessionId: newSessionId,
+              models: usageEntries.map(([model, u]) => ({
+                model,
+                inputTokens: u.inputTokens,
+                outputTokens: u.outputTokens,
+                cacheReadTokens: u.cacheReadInputTokens ?? 0,
+                cacheWriteTokens: u.cacheCreationInputTokens ?? 0,
+                costUsd: u.costUSD,
+              })),
+              timestamp: new Date().toISOString(),
+            }));
+            fs.renameSync(tempPath, finalPath);
+          } catch (err) {
+            log(`Failed to write usage IPC: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+
       writeOutput({
         status: 'success',
         result: textResult || null,

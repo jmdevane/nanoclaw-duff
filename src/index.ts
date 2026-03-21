@@ -194,13 +194,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   // Slash command short-circuit — handle before intent gate or container spawn.
-  // Only applies to non-main groups; main group gets natural language for everything.
-  if (!isMainGroup) {
-    const slashResponse = await handleSlashCommand(missedMessages, group);
-    if (slashResponse !== null) {
-      await channel.sendMessage(chatJid, slashResponse);
-      return true;
-    }
+  // Non-main groups: full slash command set (customer commands).
+  // Main group: admin-only slash commands only (/usage etc.); everything else
+  // falls through to the agent for natural language handling.
+  const slashResponse = await handleSlashCommand(missedMessages, group);
+  if (slashResponse !== null) {
+    await channel.sendMessage(chatJid, slashResponse);
+    return true;
   }
 
   // Intent gate — classify message before spawning a container.

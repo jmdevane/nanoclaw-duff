@@ -15,6 +15,7 @@ import { promisify } from 'util';
 import Database from 'better-sqlite3';
 
 import { GROUPS_DIR } from './config.js';
+import { getUsageSummary } from './db.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { NewMessage, RegisteredGroup } from './types.js';
@@ -62,6 +63,11 @@ export const SLASH_COMMANDS: SlashCommandMeta[] = [
     command: '/sync',
     args: '',
     description: 'Pull latest transactions from Plaid',
+  },
+  {
+    command: '/usage',
+    args: '',
+    description: 'Token usage + cost by customer (last 30 days) — admin only',
   },
 ];
 
@@ -198,6 +204,24 @@ async function handleAccounts(group: RegisteredGroup): Promise<string> {
   }
 }
 
+function handleUsage(): string {
+  const rows = getUsageSummary(30);
+  if (rows.length === 0) {
+    return 'No usage recorded in the last 30 days.';
+  }
+  const lines = ['*Token usage — last 30 days*', ''];
+  for (const row of rows) {
+    const cost = row.cost_usd.toFixed(4);
+    const inK = (row.input_tokens / 1000).toFixed(1);
+    const outK = (row.output_tokens / 1000).toFixed(1);
+    const cacheK = ((row.cache_read_tokens + row.cache_write_tokens) / 1000).toFixed(1);
+    lines.push(
+      `• *${row.group_folder}* — $${cost} (${inK}K in / ${outK}K out / ${cacheK}K cache, ${row.query_count} queries)`,
+    );
+  }
+  return lines.join('\n');
+}
+
 async function handleSync(group: RegisteredGroup): Promise<string> {
   try {
     const output = await runKernel('ingest.py', ['sync', group.folder], group);
@@ -241,6 +265,16 @@ export async function handleSlashCommand(
   const cmd = rawCmd.toLowerCase();
 
   logger.info({ group: group.name, cmd, subArg }, 'Slash command intercepted');
+
+  // Main group only handles admin commands; all others fall through to the agent.
+  if (group.isMain) {
+    switch (cmd) {
+      case '/usage':
+        return handleUsage();
+      default:
+        return null;
+    }
+  }
 
   switch (cmd) {
     case '/help':
