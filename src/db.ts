@@ -104,6 +104,34 @@ function createSchema(database: Database.Database): void {
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS customer_profiles (
+      group_folder            TEXT PRIMARY KEY,
+      stripe_customer_id      TEXT UNIQUE,
+      stripe_subscription_id  TEXT UNIQUE,
+      subscription_status     TEXT NOT NULL DEFAULT 'pending'
+                                   CHECK(subscription_status IN
+                                     ('pending','active','past_due','cancelled','waitlisted')),
+      plan                    TEXT CHECK(plan IN ('monthly','annual')),
+      current_period_end      TEXT,
+      email                   TEXT,
+      company_name            TEXT,
+      channel_type            TEXT NOT NULL DEFAULT 'telegram'
+                                   CHECK(channel_type IN ('telegram','slack','whatsapp')),
+      channel_identity        TEXT NOT NULL DEFAULT '',
+      audit_delivered_at      TEXT,
+      activated_at            TEXT,
+      cancelled_at            TEXT,
+      created_at              TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_profiles_stripe_customer ON customer_profiles(stripe_customer_id);
+    CREATE INDEX IF NOT EXISTS idx_profiles_status ON customer_profiles(subscription_status);
+    CREATE TABLE IF NOT EXISTS churn_feedback (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL REFERENCES customer_profiles(group_folder),
+      reason_code  INTEGER NOT NULL CHECK(reason_code BETWEEN 1 AND 5),
+      raw_reply    TEXT,
+      recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -810,9 +838,114 @@ export function getOnboardingSession(
 }
 
 export function markSessionUsed(id: string): void {
+  db.prepare('UPDATE onboarding_sessions SET token_used = 1 WHERE id = ?').run(
+    id,
+  );
+}
+
+// --- Customer profiles ---
+
+export interface CustomerProfile {
+  group_folder: string;
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  subscription_status: 'pending' | 'active' | 'past_due' | 'cancelled' | 'waitlisted';
+  plan: 'monthly' | 'annual' | null;
+  current_period_end: string | null;
+  email: string | null;
+  company_name: string | null;
+  channel_type: string;
+  channel_identity: string;
+  audit_delivered_at: string | null;
+  activated_at: string | null;
+  cancelled_at: string | null;
+  created_at: string;
+}
+
+export function getCustomerProfileByFolder(
+  folder: string,
+): CustomerProfile | undefined {
+  return db
+    .prepare('SELECT * FROM customer_profiles WHERE group_folder = ?')
+    .get(folder) as CustomerProfile | undefined;
+}
+
+export function getCustomerProfileBySubscriptionId(
+  subId: string,
+): CustomerProfile | undefined {
+  return db
+    .prepare('SELECT * FROM customer_profiles WHERE stripe_subscription_id = ?')
+    .get(subId) as CustomerProfile | undefined;
+}
+
+export function getCustomerProfileByStripeCustomerId(
+  custId: string,
+): CustomerProfile | undefined {
+  return db
+    .prepare('SELECT * FROM customer_profiles WHERE stripe_customer_id = ?')
+    .get(custId) as CustomerProfile | undefined;
+}
+
+export function updateCustomerSubscription(
+  folder: string,
+  updates: {
+    stripe_customer_id?: string | null;
+    stripe_subscription_id?: string | null;
+    subscription_status?: 'pending' | 'active' | 'past_due' | 'cancelled' | 'waitlisted';
+    plan?: 'monthly' | 'annual' | null;
+    current_period_end?: string | null;
+    email?: string | null;
+    company_name?: string | null;
+    activated_at?: string | null;
+    cancelled_at?: string | null;
+  },
+): void {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+
+  if (updates.stripe_customer_id !== undefined) {
+    fields.push('stripe_customer_id = ?');
+    values.push(updates.stripe_customer_id);
+  }
+  if (updates.stripe_subscription_id !== undefined) {
+    fields.push('stripe_subscription_id = ?');
+    values.push(updates.stripe_subscription_id);
+  }
+  if (updates.subscription_status !== undefined) {
+    fields.push('subscription_status = ?');
+    values.push(updates.subscription_status);
+  }
+  if (updates.plan !== undefined) {
+    fields.push('plan = ?');
+    values.push(updates.plan);
+  }
+  if (updates.current_period_end !== undefined) {
+    fields.push('current_period_end = ?');
+    values.push(updates.current_period_end);
+  }
+  if (updates.email !== undefined) {
+    fields.push('email = ?');
+    values.push(updates.email);
+  }
+  if (updates.company_name !== undefined) {
+    fields.push('company_name = ?');
+    values.push(updates.company_name);
+  }
+  if (updates.activated_at !== undefined) {
+    fields.push('activated_at = ?');
+    values.push(updates.activated_at);
+  }
+  if (updates.cancelled_at !== undefined) {
+    fields.push('cancelled_at = ?');
+    values.push(updates.cancelled_at);
+  }
+
+  if (fields.length === 0) return;
+
+  values.push(folder);
   db.prepare(
-    'UPDATE onboarding_sessions SET token_used = 1 WHERE id = ?',
-  ).run(id);
+    `UPDATE customer_profiles SET ${fields.join(', ')} WHERE group_folder = ?`,
+  ).run(...values);
 }
 
 export function getUsageSummary(days = 30): Array<{

@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y \
         rapidfuzz cryptography \
         beancount==2.3.6 reportlab \
         matplotlib \
+        plaid-python \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser

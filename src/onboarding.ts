@@ -21,12 +21,19 @@ import express, { Request, Response } from 'express';
 import { Configuration, PlaidApi, PlaidEnvironments } from 'plaid';
 import Stripe from 'stripe';
 
-import { ASSISTANT_NAME, ONBOARDING_PORT, PUBLIC_URL } from './config.js';
+import {
+  ASSISTANT_NAME,
+  ONBOARDING_PORT,
+  PUBLIC_URL,
+  STRIPE_PAYMENT_LINK,
+} from './config.js';
 import {
   createOnboardingSession,
   createTask,
+  getCustomerProfileByFolder,
   getOnboardingSession,
   markSessionUsed,
+  updateCustomerSubscription,
 } from './db.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
@@ -49,7 +56,8 @@ function secrets() {
     'STRIPE_MODE',
     'STRIPE_TEST_SECRET_KEY',
     'STRIPE_LIVE_SECRET_KEY',
-    'STRIPE_PAYMENT_LINK',
+    'STRIPE_TEST_WEBHOOK_SECRET',
+    'STRIPE_LIVE_WEBHOOK_SECRET',
     'STRIPE_PRICE_ID',
     'SOLOLEDGER_KERNEL_PATH',
     'SOLOLEDGER_MASTER_KEY',
@@ -190,20 +198,26 @@ async function runProvision(
 ): Promise<void> {
   const s = secrets();
   const kernelPath =
-    s.SOLOLEDGER_KERNEL_PATH ||
-    path.resolve(process.cwd(), '..', 'kernel');
+    s.SOLOLEDGER_KERNEL_PATH || path.resolve(process.cwd(), '..', 'kernel');
   const scriptPath = path.join(kernelPath, 'provision.py');
 
   const args = [
     scriptPath,
     folder,
-    '--assistant-name', ASSISTANT_NAME,
-    '--group-name', groupName,
-    '--jid', chatJid,
-    '--channel-type', 'telegram',
-    '--channel-identity', chatJid,
-    '--plaid-token', plaidToken,
-    '--plaid-item-id', plaidItemId,
+    '--assistant-name',
+    ASSISTANT_NAME,
+    '--group-name',
+    groupName,
+    '--jid',
+    chatJid,
+    '--channel-type',
+    'telegram',
+    '--channel-identity',
+    chatJid,
+    '--plaid-token',
+    plaidToken,
+    '--plaid-item-id',
+    plaidItemId,
   ];
 
   const env: NodeJS.ProcessEnv = {
@@ -230,8 +244,11 @@ async function resolveCheckoutUrl(
   chatJid: string,
   folder: string,
 ): Promise<string | null> {
-  const s = secrets();
-  if (s.STRIPE_PAYMENT_LINK) return s.STRIPE_PAYMENT_LINK;
+  // Always prefer a dynamic session for the onboarding checkout — it guarantees
+  // client_reference_id and metadata are set on the session so the webhook can
+  // reliably match back to this customer's folder.
+  // Static STRIPE_PAYMENT_LINK is used only for re-subscribe gating messages
+  // (see index.ts) where per-customer metadata isn't needed.
   return tryCreateStripeCheckout(chatJid, folder);
 }
 
@@ -254,6 +271,7 @@ async function tryCreateStripeCheckout(
       line_items: [{ price: priceId, quantity: 1 }],
       success_url: `${publicUrl}/checkout/success`,
       cancel_url: `${publicUrl}/checkout/cancel`,
+      client_reference_id: folder,
       metadata: { folder, chatJid },
     });
     return session.url;
@@ -263,6 +281,82 @@ async function tryCreateStripeCheckout(
       'Stripe checkout session creation failed',
     );
     return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stripe webhook event handler
+// ---------------------------------------------------------------------------
+
+async function handleStripeEvent(
+  event: Stripe.Event,
+  deps: OnboardingDeps,
+): Promise<void> {
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object as Stripe.Checkout.Session;
+
+      // Resolve folder from client_reference_id (set when building the checkout URL)
+      // or metadata.folder (set by dynamic checkout session fallback).
+      const folder =
+        session.client_reference_id ?? session.metadata?.folder ?? null;
+      if (!folder) {
+        logger.warn(
+          { eventId: event.id },
+          'checkout.session.completed: no folder in client_reference_id or metadata — skipping',
+        );
+        return;
+      }
+
+      const profile = getCustomerProfileByFolder(folder);
+      if (!profile) {
+        logger.warn(
+          { folder, eventId: event.id },
+          'checkout.session.completed: no customer_profiles row found — skipping',
+        );
+        return;
+      }
+
+      const stripeCustomerId =
+        typeof session.customer === 'string'
+          ? session.customer
+          : (session.customer as Stripe.Customer | null)?.id ?? null;
+      const stripeSubscriptionId =
+        typeof session.subscription === 'string'
+          ? session.subscription
+          : (session.subscription as Stripe.Subscription | null)?.id ?? null;
+      const email = session.customer_details?.email ?? null;
+      // company_name from Stripe custom_fields (configured on the Payment Link
+      // in the Stripe dashboard as a custom field with key "company_name")
+      const companyField = (session.custom_fields ?? []).find(
+        (f) => f.key === 'company_name',
+      );
+      const companyName = companyField?.text?.value ?? null;
+
+      updateCustomerSubscription(folder, {
+        stripe_customer_id: stripeCustomerId,
+        stripe_subscription_id: stripeSubscriptionId,
+        subscription_status: 'active',
+        email,
+        company_name: companyName,
+        activated_at: new Date().toISOString(),
+      });
+
+      logger.info(
+        { folder, stripeCustomerId, stripeSubscriptionId },
+        'Subscription activated via checkout.session.completed',
+      );
+
+      // Confirmation message — direct send, never through agent
+      await deps.sendMessage(
+        profile.channel_identity,
+        `You're all set. Your books are live.\n\nAsk me anything about your finances — or try: "What are my top 5 expenses this month?"`,
+      );
+      break;
+    }
+
+    default:
+      logger.debug({ type: event.type }, 'Unhandled Stripe webhook event');
   }
 }
 
@@ -389,14 +483,23 @@ export async function handleTelegramStart(
   if (checkoutUrl) {
     const checkoutJid = chatJid;
     const checkoutMsg = `Ready to make it official? [Start your SoloLedger subscription here](${checkoutUrl})`;
-    setTimeout(() => {
-      deps
-        .sendMessage(checkoutJid, checkoutMsg)
-        .catch((err) =>
-          logger.error({ chatJid: checkoutJid, err }, 'Failed to send checkout URL'),
-        );
-    }, 3 * 60 * 1000);
-    logger.info({ chatJid, folder: session.folder }, 'Checkout URL scheduled (direct send, 3 min)');
+    setTimeout(
+      () => {
+        deps
+          .sendMessage(checkoutJid, checkoutMsg)
+          .catch((err) =>
+            logger.error(
+              { chatJid: checkoutJid, err },
+              'Failed to send checkout URL',
+            ),
+          );
+      },
+      3 * 60 * 1000,
+    );
+    logger.info(
+      { chatJid, folder: session.folder },
+      'Checkout URL scheduled (direct send, 3 min)',
+    );
   }
 
   // 24-hour recipe follow-up task
@@ -618,6 +721,58 @@ function landingPage(publicUrl: string): string {
 export function startOnboardingServer(deps: OnboardingDeps): void {
   const publicUrl = PUBLIC_URL || `http://localhost:${ONBOARDING_PORT}`;
   const app = express();
+
+  // Stripe webhook — raw body MUST be registered BEFORE express.json() middleware.
+  // Stripe's signature verification requires the raw unparsed request body.
+  app.post(
+    '/webhooks/stripe',
+    express.raw({ type: 'application/json' }),
+    async (req: Request, res: Response) => {
+      const s = secrets();
+      const mode = s.STRIPE_MODE || 'test';
+      const webhookSecret =
+        mode === 'live' ? s.STRIPE_LIVE_WEBHOOK_SECRET : s.STRIPE_TEST_WEBHOOK_SECRET;
+
+      if (!webhookSecret) {
+        logger.warn('Stripe webhook secret not configured — rejecting request');
+        res.status(400).send('Webhook secret not configured');
+        return;
+      }
+
+      const stripe = makeStripeClient();
+      if (!stripe) {
+        res.status(500).send('Stripe not configured');
+        return;
+      }
+
+      let event: Stripe.Event;
+      try {
+        event = stripe.webhooks.constructEvent(
+          req.body as Buffer,
+          req.headers['stripe-signature'] as string,
+          webhookSecret,
+        );
+      } catch (err) {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          'Stripe webhook signature verification failed',
+        );
+        res.status(400).send('Invalid signature');
+        return;
+      }
+
+      // Acknowledge immediately — Stripe retries on non-2xx or timeout
+      res.json({ received: true });
+
+      handleStripeEvent(event, deps).catch((err) =>
+        logger.error(
+          { err, eventType: event.type },
+          'Stripe webhook handler error',
+        ),
+      );
+    },
+  );
+
   app.use(express.json());
 
   // Landing page
@@ -723,7 +878,10 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
   });
 
   app.listen(ONBOARDING_PORT, '0.0.0.0', () => {
-    logger.info({ port: ONBOARDING_PORT, publicUrl }, 'Onboarding server started');
+    logger.info(
+      { port: ONBOARDING_PORT, publicUrl },
+      'Onboarding server started',
+    );
     console.log(`\n  Onboarding: ${publicUrl}\n`);
   });
 }

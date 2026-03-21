@@ -6,6 +6,7 @@ import {
   CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
+  STRIPE_PAYMENT_LINK,
   TELEGRAM_BOT_POOL,
   TIMEZONE,
   TRIGGER_PATTERN,
@@ -32,6 +33,7 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getCustomerProfileByFolder,
   getMessagesSince,
   getNewMessages,
   getRegisteredGroup,
@@ -202,6 +204,37 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (slashResponse !== null) {
     await channel.sendMessage(chatJid, slashResponse);
     return true;
+  }
+
+  // Subscription gate — check status before spawning a container.
+  // Slash commands above bypass this intentionally (so /help etc. still work).
+  // isMain groups bypass entirely.
+  if (!isMainGroup) {
+    const profile = getCustomerProfileByFolder(group.folder);
+    if (profile?.subscription_status === 'past_due') {
+      await channel.sendMessage(
+        chatJid,
+        `There's an issue with your SoloLedger payment — your subscription is past due. Please update your payment method to keep your books running. Your data is safe and we'll be here when you're ready.`,
+      );
+      return true;
+    }
+    if (profile?.subscription_status === 'cancelled') {
+      let resubUrl: string | null = null;
+      if (STRIPE_PAYMENT_LINK) {
+        try {
+          const u = new URL(STRIPE_PAYMENT_LINK);
+          u.searchParams.set('client_reference_id', group.folder);
+          resubUrl = u.toString();
+        } catch {
+          resubUrl = STRIPE_PAYMENT_LINK;
+        }
+      }
+      const msg = resubUrl
+        ? `Your SoloLedger subscription has ended. [Reactivate here](${resubUrl}) — your books and history will be right where you left them.`
+        : `Your SoloLedger subscription has ended. Please contact support to reactivate.`;
+      await channel.sendMessage(chatJid, msg);
+      return true;
+    }
   }
 
   // Intent gate — classify message before spawning a container.

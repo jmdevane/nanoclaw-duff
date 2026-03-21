@@ -14,6 +14,7 @@ const envConfig = readEnvFile([
   'ONBOARDING_SECRET',
   'PLAID_ENV',
   'STRIPE_MODE',
+  'STRIPE_PAYMENT_LINK',
 ]);
 
 export const ASSISTANT_NAME =
@@ -79,14 +80,15 @@ export const ONBOARDING_PORT = parseInt(
   process.env.ONBOARDING_PORT || '4000',
   10,
 );
-export const PUBLIC_URL =
-  process.env.PUBLIC_URL || envConfig.PUBLIC_URL || '';
+export const PUBLIC_URL = process.env.PUBLIC_URL || envConfig.PUBLIC_URL || '';
 export const ONBOARDING_SECRET =
   process.env.ONBOARDING_SECRET || envConfig.ONBOARDING_SECRET || '';
 export const PLAID_ENV =
   process.env.PLAID_ENV || envConfig.PLAID_ENV || 'sandbox';
 export const STRIPE_MODE =
   process.env.STRIPE_MODE || envConfig.STRIPE_MODE || 'test';
+export const STRIPE_PAYMENT_LINK =
+  process.env.STRIPE_PAYMENT_LINK || envConfig.STRIPE_PAYMENT_LINK || '';
 
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default
