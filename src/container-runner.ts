@@ -494,7 +494,10 @@ export async function runContainerAgent(
             try {
               if (fs.statSync(filePath).mtimeMs < cutoffMs) {
                 fs.rmSync(filePath);
-                logger.debug({ file, group: group.folder }, 'Deleted old report PNG');
+                logger.debug(
+                  { file, group: group.folder },
+                  'Deleted old report PNG',
+                );
               }
             } catch {
               // File may have been deleted already; ignore
