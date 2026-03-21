@@ -10,6 +10,10 @@ const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'TELEGRAM_BOT_POOL',
+  'PUBLIC_URL',
+  'ONBOARDING_SECRET',
+  'PLAID_ENV',
+  'STRIPE_MODE',
 ]);
 
 export const ASSISTANT_NAME =
@@ -70,6 +74,19 @@ export const TRIGGER_PATTERN = new RegExp(
   `^@${escapeRegex(ASSISTANT_NAME)}\\b`,
   'i',
 );
+
+export const ONBOARDING_PORT = parseInt(
+  process.env.ONBOARDING_PORT || '4000',
+  10,
+);
+export const PUBLIC_URL =
+  process.env.PUBLIC_URL || envConfig.PUBLIC_URL || '';
+export const ONBOARDING_SECRET =
+  process.env.ONBOARDING_SECRET || envConfig.ONBOARDING_SECRET || '';
+export const PLAID_ENV =
+  process.env.PLAID_ENV || envConfig.PLAID_ENV || 'sandbox';
+export const STRIPE_MODE =
+  process.env.STRIPE_MODE || envConfig.STRIPE_MODE || 'test';
 
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Uses system timezone by default

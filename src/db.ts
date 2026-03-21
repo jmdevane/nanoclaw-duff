@@ -95,6 +95,15 @@ function createSchema(database: Database.Database): void {
       container_config TEXT,
       requires_trigger INTEGER DEFAULT 1
     );
+    CREATE TABLE IF NOT EXISTS onboarding_sessions (
+      id TEXT PRIMARY KEY,
+      folder TEXT NOT NULL,
+      plaid_access_token TEXT,
+      plaid_item_id TEXT,
+      token_used INTEGER DEFAULT 0,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -759,6 +768,51 @@ export function writeTokenUsage(
     },
   );
   insertAll(rows);
+}
+
+// --- Onboarding sessions ---
+
+export interface OnboardingSession {
+  id: string;
+  folder: string;
+  plaid_access_token: string | null;
+  plaid_item_id: string | null;
+  token_used: number;
+  expires_at: string;
+  created_at: string;
+}
+
+export function createOnboardingSession(data: {
+  id: string;
+  folder: string;
+  plaid_access_token: string;
+  plaid_item_id: string;
+  expires_at: string;
+}): void {
+  db.prepare(
+    `INSERT INTO onboarding_sessions (id, folder, plaid_access_token, plaid_item_id, expires_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(
+    data.id,
+    data.folder,
+    data.plaid_access_token,
+    data.plaid_item_id,
+    data.expires_at,
+  );
+}
+
+export function getOnboardingSession(
+  id: string,
+): OnboardingSession | undefined {
+  return db
+    .prepare('SELECT * FROM onboarding_sessions WHERE id = ?')
+    .get(id) as OnboardingSession | undefined;
+}
+
+export function markSessionUsed(id: string): void {
+  db.prepare(
+    'UPDATE onboarding_sessions SET token_used = 1 WHERE id = ?',
+  ).run(id);
 }
 
 export function getUsageSummary(days = 30): Array<{

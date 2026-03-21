@@ -46,7 +46,8 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { initBotPool } from './channels/telegram.js';
+import { initBotPool, setStartCommandHandler } from './channels/telegram.js';
+import { handleTelegramStart, startOnboardingServer } from './onboarding.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
@@ -592,6 +593,22 @@ async function main(): Promise<void> {
   if (TELEGRAM_BOT_POOL.length > 0) {
     await initBotPool(TELEGRAM_BOT_POOL);
   }
+
+  // Onboarding server + Telegram /start handler
+  const onboardingDeps = {
+    sendMessage: async (jid: string, text: string) => {
+      const ch = findChannel(channels, jid);
+      if (ch) await ch.sendMessage(jid, text);
+    },
+    loadGroups: () => {
+      registeredGroups = getAllRegisteredGroups();
+    },
+    isRegistered: (jid: string) => jid in registeredGroups,
+  };
+  setStartCommandHandler((chatJid, token) =>
+    handleTelegramStart(chatJid, token, onboardingDeps),
+  );
+  startOnboardingServer(onboardingDeps);
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

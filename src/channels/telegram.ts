@@ -41,6 +41,20 @@ async function sendTelegramMessage(
   }
 }
 
+// ---------------------------------------------------------------------------
+// /start deep-link handler — injected by index.ts after onboarding server starts
+// ---------------------------------------------------------------------------
+
+let startCommandHandler:
+  | ((chatJid: string, token: string) => Promise<void>)
+  | null = null;
+
+export function setStartCommandHandler(
+  handler: (chatJid: string, token: string) => Promise<void>,
+): void {
+  startCommandHandler = handler;
+}
+
 // Bot pool for agent teams: send-only Api instances (no polling)
 const poolApis: Api[] = [];
 // Maps "{groupFolder}:{senderName}" → pool Api index for stable assignment
@@ -149,6 +163,26 @@ export class TelegramChannel implements Channel {
       client: {
         baseFetchConfig: { agent: https.globalAgent, compress: true },
       },
+    });
+
+    // Onboarding deep-link: /start {token}
+    // Fires when a customer taps t.me/BotUsername?start=TOKEN
+    this.bot.command('start', async (ctx) => {
+      const payload = ctx.match?.trim();
+      if (!payload) {
+        // Plain /start with no token — ignore (not an onboarding link)
+        return;
+      }
+      const chatJid = `tg:${ctx.chat.id}`;
+      if (startCommandHandler) {
+        try {
+          await startCommandHandler(chatJid, payload);
+        } catch (err) {
+          logger.error({ chatJid, err }, '/start handler error');
+        }
+      } else {
+        logger.warn({ chatJid }, '/start received but no handler registered');
+      }
     });
 
     // Command to get chat ID (useful for registration)
