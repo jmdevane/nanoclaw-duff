@@ -29,6 +29,7 @@ interface ContainerInput {
   assistantName?: string;
   allowedTools?: string[];
   maxTurns?: number;
+  model?: string;
 }
 
 interface ContainerOutput {
@@ -401,6 +402,7 @@ async function runQuery(
       systemPrompt: globalClaudeMd
         ? { type: 'preset' as const, preset: 'claude_code' as const, append: globalClaudeMd }
         : undefined,
+      ...(containerInput.model && { model: containerInput.model }),
       allowedTools: containerInput.allowedTools ?? [
         'Bash',
         'Read', 'Write', 'Edit', 'Glob', 'Grep',

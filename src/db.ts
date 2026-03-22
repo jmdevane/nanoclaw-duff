@@ -48,7 +48,8 @@ function createSchema(database: Database.Database): void {
       last_run TEXT,
       last_result TEXT,
       status TEXT DEFAULT 'active',
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      model TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_next_run ON scheduled_tasks(next_run);
     CREATE INDEX IF NOT EXISTS idx_status ON scheduled_tasks(status);
@@ -166,6 +167,13 @@ function createSchema(database: Database.Database): void {
     database.exec(
       `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main'`,
     );
+  } catch {
+    /* column already exists */
+  }
+
+  // Add model column to scheduled_tasks if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN model TEXT`);
   } catch {
     /* column already exists */
   }
@@ -428,8 +436,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at, model)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -442,6 +450,7 @@ export function createTask(
     task.next_run,
     task.status,
     task.created_at,
+    task.model ?? null,
   );
 }
 
@@ -470,7 +479,7 @@ export function updateTask(
   updates: Partial<
     Pick<
       ScheduledTask,
-      'prompt' | 'schedule_type' | 'schedule_value' | 'next_run' | 'status'
+      'prompt' | 'schedule_type' | 'schedule_value' | 'next_run' | 'status' | 'model'
     >
   >,
 ): void {
@@ -496,6 +505,10 @@ export function updateTask(
   if (updates.status !== undefined) {
     fields.push('status = ?');
     values.push(updates.status);
+  }
+  if (updates.model !== undefined) {
+    fields.push('model = ?');
+    values.push(updates.model);
   }
 
   if (fields.length === 0) return;

@@ -32,6 +32,7 @@ export interface ContainerConfig {
   timeout?: number; // Default: 300000 (5 minutes)
   allowedTools?: string[]; // Restrict tool surface for non-main groups (token savings + safety)
   maxTurns?: number; // Cap agent turns per session (8 for customer groups, unlimited for main)
+  model?: string; // Default model for this group's containers (overridden per-task via ScheduledTask.model)
 }
 
 export interface RegisteredGroup {
@@ -68,6 +69,7 @@ export interface ScheduledTask {
   last_result: string | null;
   status: 'active' | 'paused' | 'completed';
   created_at: string;
+  model?: string; // Override model for this task (e.g. 'claude-haiku-4-5-20251001'). Falls back to env default.
 }
 
 export interface TaskRunLog {

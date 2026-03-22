@@ -33,9 +33,11 @@ import {
   countActiveCustomers,
   createOnboardingSession,
   createTask,
+  getAllRegisteredGroups,
   getCustomerProfileByFolder,
   getCustomerProfileBySubscriptionId,
   getOnboardingSession,
+  getRegisteredGroupByFolder,
   getTasksForGroup,
   markSessionUsed,
   updateCustomerSubscription,
@@ -96,6 +98,142 @@ function secrets() {
     'WAITLIST_MODE',
     'MAX_ACTIVE_CUSTOMERS',
   ]);
+}
+
+// ---------------------------------------------------------------------------
+// Weekly sync prompt — folder interpolated at task creation time
+// ---------------------------------------------------------------------------
+
+export function makeWeeklySyncPrompt(folder: string): string {
+  return `Run the weekly transaction sync for group ${folder}.
+
+Steps in order:
+
+1. Baseline — record the last transaction date before syncing (used for net cash period):
+   Run: sqlite3 /workspace/group/ledger.db "SELECT COALESCE(MAX(transaction_date), date('now','-7 days')) FROM transactions WHERE status != 'uncategorized'"
+   Store this as LAST_SYNC_DATE.
+
+2. Sync new transactions:
+   python3 /workspace/extra/kernel/ingest.py sync ${folder}
+
+3. Get categorization suggestions (auto/review buckets):
+   python3 /workspace/extra/kernel/categorize.py suggest
+   Parse the JSON output.
+
+4. Auto-post all transactions in the "auto" bucket:
+   For each item: python3 /workspace/extra/kernel/categorize.py post {txn_id} {suggested_account} {credit_account}
+   If the "auto" bucket is empty, skip this step.
+
+5. Anomaly scan — check ALL transactions (both buckets) since LAST_SYNC_DATE for:
+   - Amounts unusually large for their category compared to past history
+   - First-time merchants that were auto-categorized (worth a mention)
+   - Possible personal charges on business accounts (round numbers, lifestyle merchants, person-to-person)
+   - Potential duplicates (same merchant, same amount within 7 days)
+   Be graceful — if transaction history is sparse or nothing genuinely stands out, omit this section entirely.
+
+6. Net cash since last sync:
+   python3 /workspace/extra/kernel/report.py pnl --from LAST_SYNC_DATE --to TODAY
+   Extract net cash movement for the summary.
+
+7. Send the summary via mcp__nanoclaw__send_message.
+
+   If new transactions were found:
+   "Weekly sync complete.
+
+   Synced X transactions — Y auto-categorized. Net cash: ±$Z (last sync: LAST_SYNC_DATE)
+   [If anomalies: Notable: one-line anomaly note]"
+
+   If the "review" bucket is non-empty, send a SECOND message immediately after:
+   "X transactions need your input:
+   1. MERCHANT — $X.XX
+   2. MERCHANT — $X.XX
+
+   Reply with categories, e.g. "1=supplies 2=meals 3=owner draw" — or just tell me what each one is."
+
+   If no new transactions came in:
+   "No new transactions since LAST_SYNC_DATE. Your books are current. Last week's net cash: ±$Z."
+
+Do not send any further messages after the summary and review list. No "Done" recap, no step-by-step log.`;
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled task seeder — called at provision AND at startup (backfill)
+// ---------------------------------------------------------------------------
+
+/**
+ * Seed all standard recurring tasks for a customer group.
+ * Idempotent — checks for existing tasks before inserting.
+ * Add new task types here; they propagate to existing groups on next startup.
+ */
+export function seedScheduledTasks(folder: string, chatJid: string): void {
+  const existingTasks = getTasksForGroup(folder);
+
+  // Monthly close — 3rd of month, 9am CST
+  const hasMonthlyClose = existingTasks.some(
+    (t) => t.schedule_type === 'cron' && t.schedule_value === '0 9 3 * *',
+  );
+  if (!hasMonthlyClose) {
+    const closeNextRun = CronExpressionParser.parse('0 9 3 * *', { tz: TIMEZONE })
+      .next()
+      .toISOString();
+    createTask({
+      id: `monthly-close-${folder}`,
+      group_folder: folder,
+      chat_jid: chatJid,
+      prompt: MONTHLY_CLOSE_PROMPT,
+      schedule_type: 'cron',
+      schedule_value: '0 9 3 * *',
+      context_mode: 'isolated',
+      next_run: closeNextRun,
+      status: 'active',
+      model: 'claude-sonnet-4-6',
+      created_at: new Date().toISOString(),
+    });
+    logger.info({ folder, chatJid }, 'Seeded monthly-close task');
+  }
+
+  // Weekly sync — Monday 9am CST
+  const hasWeeklySync = existingTasks.some(
+    (t) => t.schedule_type === 'cron' && t.schedule_value === '0 9 * * 1',
+  );
+  if (!hasWeeklySync) {
+    const syncNextRun = CronExpressionParser.parse('0 9 * * 1', { tz: TIMEZONE })
+      .next()
+      .toISOString();
+    createTask({
+      id: `weekly-sync-${folder}`,
+      group_folder: folder,
+      chat_jid: chatJid,
+      prompt: makeWeeklySyncPrompt(folder),
+      schedule_type: 'cron',
+      schedule_value: '0 9 * * 1',
+      context_mode: 'isolated',
+      next_run: syncNextRun,
+      status: 'active',
+      model: 'claude-sonnet-4-6',
+      created_at: new Date().toISOString(),
+    });
+    logger.info({ folder, chatJid }, 'Seeded weekly-sync task');
+  }
+}
+
+/**
+ * Backfill scheduled tasks for all existing customer groups at startup.
+ * Safe to call every boot — seedScheduledTasks is idempotent.
+ */
+export function seedAllCustomerTasks(): void {
+  const groups = getAllRegisteredGroups();
+  let seeded = 0;
+  for (const [jid, group] of Object.entries(groups)) {
+    if (group.isMain) continue;
+    const profile = getCustomerProfileByFolder(group.folder);
+    if (!profile) continue; // Not a customer group
+    seedScheduledTasks(group.folder, jid);
+    seeded++;
+  }
+  if (seeded > 0) {
+    logger.info({ count: seeded }, 'Startup task seed complete');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -705,40 +843,12 @@ Keep it conversational, not salesy. No bullet points — just a natural message.
     created_at: new Date().toISOString(),
   });
 
-  // Monthly close cron — 3rd of each month at 9am (TZ set via process.env.TZ)
-  // Skip if already present (e.g. re-provision)
-  const existingTasks = getTasksForGroup(session.folder);
-  const hasMonthlyClose = existingTasks.some(
-    (t) => t.schedule_type === 'cron' && t.schedule_value === '0 9 3 * *',
-  );
-  if (!hasMonthlyClose) {
-    const closeNextRun = CronExpressionParser.parse('0 9 3 * *', {
-      tz: TIMEZONE,
-    })
-      .next()
-      .toISOString();
-    const closeId = `monthly-close-${session.folder}`;
-    createTask({
-      id: closeId,
-      group_folder: session.folder,
-      chat_jid: chatJid,
-      prompt: MONTHLY_CLOSE_PROMPT,
-      schedule_type: 'cron',
-      schedule_value: '0 9 3 * *',
-      context_mode: 'isolated',
-      next_run: closeNextRun,
-      status: 'active',
-      created_at: new Date().toISOString(),
-    });
-    logger.info(
-      { chatJid, folder: session.folder, closeId, closeNextRun },
-      'Monthly close cron task scheduled',
-    );
-  }
+  // Seed all standard recurring tasks (monthly close + weekly sync)
+  seedScheduledTasks(session.folder, chatJid);
 
   logger.info(
     { chatJid, folder: session.folder, auditId, recipeId },
-    'Onboarding complete — audit, recipe, and monthly close tasks scheduled',
+    'Onboarding complete — audit, recipe, and recurring tasks scheduled',
   );
 }
 

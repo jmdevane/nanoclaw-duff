@@ -49,7 +49,7 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { initBotPool, setStartCommandHandler } from './channels/telegram.js';
-import { handleTelegramStart, startOnboardingServer } from './onboarding.js';
+import { handleTelegramStart, seedAllCustomerTasks, startOnboardingServer } from './onboarding.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
@@ -553,6 +553,7 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
+  seedAllCustomerTasks();
 
   // Start credential proxy (containers route API calls through this)
   const proxyServer = await startCredentialProxy(

@@ -15,6 +15,7 @@ const envConfig = readEnvFile([
   'PLAID_ENV',
   'STRIPE_MODE',
   'STRIPE_PAYMENT_LINK',
+  'TZ',
 ]);
 
 export const ASSISTANT_NAME =
@@ -91,9 +92,12 @@ export const STRIPE_PAYMENT_LINK =
   process.env.STRIPE_PAYMENT_LINK || envConfig.STRIPE_PAYMENT_LINK || '';
 
 // Timezone for scheduled tasks (cron expressions, etc.)
-// Uses system timezone by default
+// Reads TZ from .env so the value doesn't require a service file change.
+// Setting process.env.TZ here ensures Node's date functions also respect it.
+const _tz = process.env.TZ || envConfig.TZ;
+if (_tz) process.env.TZ = _tz;
 export const TIMEZONE =
-  process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  _tz || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 export const TELEGRAM_BOT_POOL = (
   process.env.TELEGRAM_BOT_POOL ||

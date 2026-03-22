@@ -22,7 +22,7 @@ import {
   getRegisteredGroupByFolder,
   getUsageSummary,
 } from './db.js';
-import { MONTHLY_CLOSE_PROMPT } from './onboarding.js';
+import { makeWeeklySyncPrompt, MONTHLY_CLOSE_PROMPT } from './onboarding.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { NewMessage, RegisteredGroup } from './types.js';
@@ -80,6 +80,11 @@ export const SLASH_COMMANDS: SlashCommandMeta[] = [
     command: '/billing',
     args: '',
     description: 'Get a link to manage your subscription',
+  },
+  {
+    command: '/pending',
+    args: '',
+    description: 'Show transactions waiting for your input',
   },
 ];
 
@@ -214,6 +219,76 @@ async function handleAccounts(group: RegisteredGroup): Promise<string> {
     logger.warn({ group: group.name, err }, 'slash /accounts: error');
     return `Could not list accounts: ${err instanceof Error ? err.message : String(err)}`;
   }
+}
+
+async function handlePending(group: RegisteredGroup): Promise<string> {
+  try {
+    const raw = await runKernel('categorize.py', ['pending', '--json'], group);
+    if (!raw || raw === '[]') return 'No transactions waiting for input — you\'re all caught up.';
+
+    let rows: Array<{
+      id: string;
+      transaction_date: string;
+      amount_cents: number;
+      raw_description: string;
+    }>;
+    try {
+      rows = JSON.parse(raw);
+    } catch {
+      return 'Could not parse pending transactions.';
+    }
+
+    if (rows.length === 0) return 'No transactions waiting for input — you\'re all caught up.';
+
+    const lines = [`*${rows.length} transaction${rows.length === 1 ? '' : 's'} need your input:*`, ''];
+    rows.slice(0, 20).forEach((r, i) => {
+      const amount = Math.abs(r.amount_cents) / 100;
+      const sign = r.amount_cents > 0 ? '-' : '+';
+      const desc = (r.raw_description || r.id).slice(0, 40);
+      lines.push(`${i + 1}. ${desc} — ${sign}$${amount.toFixed(2)}`);
+    });
+    if (rows.length > 20) lines.push(`…and ${rows.length - 20} more.`);
+    lines.push('');
+    lines.push('Reply with categories, e.g. "1=supplies 2=meals 3=owner draw" — or just tell me what each one is.');
+    return lines.join('\n');
+  } catch (err) {
+    logger.warn({ group: group.name, err }, 'slash /pending: error');
+    return `Could not fetch pending transactions: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+function handleSyncWeekly(
+  subArg: string | undefined,
+  group: RegisteredGroup,
+  chatJid: string,
+): string {
+  let targetFolder = group.folder;
+  let targetJid = chatJid;
+
+  if (subArg) {
+    const target = getRegisteredGroupByFolder(subArg);
+    if (!target) return `No group found with folder "${subArg}".`;
+    targetFolder = target.folder;
+    targetJid = target.jid;
+  }
+
+  const taskId = `manual-sync-${targetFolder}-${Date.now()}`;
+  createTask({
+    id: taskId,
+    group_folder: targetFolder,
+    chat_jid: targetJid,
+    prompt: makeWeeklySyncPrompt(targetFolder),
+    schedule_type: 'once',
+    schedule_value: new Date().toISOString(),
+    context_mode: 'isolated',
+    next_run: new Date().toISOString(),
+    status: 'active',
+    model: 'claude-sonnet-4-6',
+    created_at: new Date().toISOString(),
+  });
+
+  const label = subArg ? `group \`${targetFolder}\`` : 'this group';
+  return `Weekly sync queued for ${label} — summary will arrive shortly.`;
 }
 
 function handleClose(
@@ -356,6 +431,8 @@ export async function handleSlashCommand(
         return handleUsage();
       case '/close':
         return handleClose(subArg, group, lastUser.chat_jid);
+      case '/sync-weekly':
+        return handleSyncWeekly(subArg, group, lastUser.chat_jid);
       default:
         return null;
     }
@@ -382,6 +459,9 @@ export async function handleSlashCommand(
 
     case '/billing':
       return handleBilling(group);
+
+    case '/pending':
+      return handlePending(group);
 
     default:
       // Unknown slash — let the agent handle it naturally

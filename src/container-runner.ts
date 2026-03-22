@@ -26,6 +26,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -43,6 +44,7 @@ export interface ContainerInput {
   assistantName?: string;
   allowedTools?: string[];
   maxTurns?: number;
+  model?: string; // Override model for this invocation. Falls back to ANTHROPIC_MODEL env default.
 }
 
 export interface ContainerOutput {
@@ -210,6 +212,7 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  extraEnv: Record<string, string> = {},
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -244,6 +247,11 @@ function buildContainerArgs(
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
+  }
+
+  // Caller-supplied env vars (e.g. kernel secrets for admin group)
+  for (const [k, v] of Object.entries(extraEnv)) {
+    args.push('-e', `${k}=${v}`);
   }
 
   for (const mount of mounts) {
@@ -291,7 +299,25 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+
+  // Admin group only: inject kernel secrets so ingest.py can reach the vault and Plaid API.
+  // Customer group containers never receive SOLOLEDGER_MASTER_KEY — they would get the
+  // decrypted token by value when customer Plaid sync is implemented (see /add-account spec).
+  const extraEnv: Record<string, string> = {};
+  if (input.isMain) {
+    const kernelSecrets = readEnvFile([
+      'SOLOLEDGER_MASTER_KEY',
+      'PLAID_CLIENT_ID',
+      'PLAID_API_KEY_PROD',
+      'PLAID_API_KEY_TEST',
+      'PLAID_ENV',
+    ]);
+    for (const [k, v] of Object.entries(kernelSecrets)) {
+      if (v) extraEnv[k] = v;
+    }
+  }
+
+  const containerArgs = buildContainerArgs(mounts, containerName, extraEnv);
 
   logger.debug(
     {
@@ -337,6 +363,7 @@ export async function runContainerAgent(
       ...input,
       allowedTools: input.allowedTools ?? group.containerConfig?.allowedTools,
       maxTurns: input.maxTurns ?? group.containerConfig?.maxTurns,
+      model: input.model ?? group.containerConfig?.model,
     };
     container.stdin.write(JSON.stringify(enrichedInput));
     container.stdin.end();
