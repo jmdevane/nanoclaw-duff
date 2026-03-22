@@ -15,6 +15,8 @@ const envConfig = readEnvFile([
   'PLAID_ENV',
   'STRIPE_MODE',
   'STRIPE_PAYMENT_LINK',
+  'PRODUCT_NAME',
+  'PRODUCT_URL',
   'TZ',
 ]);
 
@@ -90,14 +92,17 @@ export const STRIPE_MODE =
   process.env.STRIPE_MODE || envConfig.STRIPE_MODE || 'test';
 export const STRIPE_PAYMENT_LINK =
   process.env.STRIPE_PAYMENT_LINK || envConfig.STRIPE_PAYMENT_LINK || '';
+export const PRODUCT_NAME =
+  process.env.PRODUCT_NAME || envConfig.PRODUCT_NAME || 'Judy';
+export const PRODUCT_URL =
+  process.env.PRODUCT_URL || envConfig.PRODUCT_URL || 'hirejudy.com';
 
 // Timezone for scheduled tasks (cron expressions, etc.)
 // Reads TZ from .env so the value doesn't require a service file change.
 // Setting process.env.TZ here ensures Node's date functions also respect it.
 const _tz = process.env.TZ || envConfig.TZ;
 if (_tz) process.env.TZ = _tz;
-export const TIMEZONE =
-  _tz || Intl.DateTimeFormat().resolvedOptions().timeZone;
+export const TIMEZONE = _tz || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 export const TELEGRAM_BOT_POOL = (
   process.env.TELEGRAM_BOT_POOL ||

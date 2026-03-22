@@ -399,15 +399,20 @@ export class TelegramChannel implements Channel {
       logger.warn('Telegram bot not initialized');
       return;
     }
+    const numericId = jid.replace(/^tg:/, '');
+    const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+    const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(ext);
+    const captionOpts = caption ? { caption } : {};
     try {
-      const numericId = jid.replace(/^tg:/, '');
-      await this.bot.api.sendPhoto(numericId, new InputFile(filePath), {
-        ...(caption ? { caption } : {}),
-      });
-      logger.info({ jid, filePath }, 'Telegram photo sent');
+      if (isImage) {
+        await this.bot.api.sendPhoto(numericId, new InputFile(filePath), captionOpts);
+        logger.info({ jid, filePath }, 'Telegram photo sent');
+      } else {
+        await this.bot.api.sendDocument(numericId, new InputFile(filePath), captionOpts);
+        logger.info({ jid, filePath }, 'Telegram document sent');
+      }
     } catch (err) {
-      logger.error({ jid, filePath, err }, 'Failed to send Telegram photo');
-      // Fall back to sending caption as text if photo fails
+      logger.error({ jid, filePath, err }, 'Failed to send Telegram file');
       if (caption) {
         await this.sendMessage(jid, caption);
       }
