@@ -28,9 +28,11 @@ import {
   STRIPE_PAYMENT_LINK,
 } from './config.js';
 import {
+  countActiveCustomers,
   createOnboardingSession,
   createTask,
   getCustomerProfileByFolder,
+  getCustomerProfileBySubscriptionId,
   getOnboardingSession,
   markSessionUsed,
   updateCustomerSubscription,
@@ -61,6 +63,8 @@ function secrets() {
     'STRIPE_PRICE_ID',
     'SOLOLEDGER_KERNEL_PATH',
     'SOLOLEDGER_MASTER_KEY',
+    'WAITLIST_MODE',
+    'MAX_ACTIVE_CUSTOMERS',
   ]);
 }
 
@@ -320,11 +324,11 @@ async function handleStripeEvent(
       const stripeCustomerId =
         typeof session.customer === 'string'
           ? session.customer
-          : (session.customer as Stripe.Customer | null)?.id ?? null;
+          : ((session.customer as Stripe.Customer | null)?.id ?? null);
       const stripeSubscriptionId =
         typeof session.subscription === 'string'
           ? session.subscription
-          : (session.subscription as Stripe.Subscription | null)?.id ?? null;
+          : ((session.subscription as Stripe.Subscription | null)?.id ?? null);
       const email = session.customer_details?.email ?? null;
       // company_name from Stripe custom_fields (configured on the Payment Link
       // in the Stripe dashboard as a custom field with key "company_name")
@@ -351,6 +355,154 @@ async function handleStripeEvent(
       await deps.sendMessage(
         profile.channel_identity,
         `You're all set. Your books are live.\n\nAsk me anything about your finances — or try: "What are my top 5 expenses this month?"`,
+      );
+      break;
+    }
+
+    case 'customer.subscription.updated': {
+      const subscription = event.data.object as Stripe.Subscription;
+      const profile = getCustomerProfileBySubscriptionId(subscription.id);
+      if (!profile) {
+        logger.debug(
+          { subId: subscription.id },
+          'customer.subscription.updated: no matching profile — skipping',
+        );
+        return;
+      }
+
+      // Map Stripe subscription statuses to our statuses.
+      // Note: 'canceled' is intentionally excluded here — when a customer
+      // cancels via the portal, Stripe sets cancel_at_period_end=true but
+      // the status remains 'active' until the period ends. Access is preserved
+      // until customer.subscription.deleted fires (end of billing period).
+      // Immediate cancellations also emit customer.subscription.deleted,
+      // so that handler covers both cases.
+      const statusMap: Record<string, 'active' | 'past_due'> = {
+        active: 'active',
+        trialing: 'active',
+        past_due: 'past_due',
+        unpaid: 'past_due',
+      };
+      const newStatus = statusMap[subscription.status] ?? null;
+
+      // Send a heads-up if cancellation is scheduled at period end
+      const cancelAt = subscription.cancel_at
+        ? new Date(subscription.cancel_at * 1000)
+        : null;
+      if (subscription.cancel_at_period_end && cancelAt) {
+        const dateStr = cancelAt.toLocaleDateString('en-US', {
+          month: 'long',
+          day: 'numeric',
+          year: 'numeric',
+        });
+        deps
+          .sendMessage(
+            profile.channel_identity,
+            `Your SoloLedger subscription is set to end on ${dateStr}. You'll have full access until then. Reply /billing any time to manage your subscription.`,
+          )
+          .catch((err) =>
+            logger.error(
+              { err, folder: profile.group_folder },
+              'Failed to send cancellation notice',
+            ),
+          );
+      }
+
+      const item = subscription.items?.data?.[0];
+      const interval = item?.price?.recurring?.interval;
+      const plan: 'monthly' | 'annual' | null =
+        interval === 'month'
+          ? 'monthly'
+          : interval === 'year'
+            ? 'annual'
+            : null;
+
+      const periodEnd = new Date(
+        subscription.current_period_end * 1000,
+      ).toISOString();
+
+      updateCustomerSubscription(profile.group_folder, {
+        ...(newStatus ? { subscription_status: newStatus } : {}),
+        ...(plan ? { plan } : {}),
+        current_period_end: periodEnd,
+      });
+
+      logger.info(
+        {
+          folder: profile.group_folder,
+          newStatus,
+          plan,
+          periodEnd,
+        },
+        'Subscription updated via customer.subscription.updated',
+      );
+      break;
+    }
+
+    case 'customer.subscription.deleted': {
+      const subscription = event.data.object as Stripe.Subscription;
+      const profile = getCustomerProfileBySubscriptionId(subscription.id);
+      if (!profile) {
+        logger.debug(
+          { subId: subscription.id },
+          'customer.subscription.deleted: no matching profile — skipping',
+        );
+        return;
+      }
+
+      updateCustomerSubscription(profile.group_folder, {
+        subscription_status: 'cancelled',
+        cancelled_at: new Date().toISOString(),
+      });
+
+      logger.info(
+        { folder: profile.group_folder },
+        'Subscription cancelled via customer.subscription.deleted',
+      );
+
+      await deps.sendMessage(
+        profile.channel_identity,
+        `Your SoloLedger subscription has ended. Your books and history are preserved — reply /billing any time to reactivate.`,
+      );
+      break;
+    }
+
+    case 'invoice.payment_failed': {
+      const invoice = event.data.object as Stripe.Invoice;
+      const subId =
+        typeof invoice.subscription === 'string'
+          ? invoice.subscription
+          : (invoice.subscription as Stripe.Subscription | null)?.id ?? null;
+
+      if (!subId) {
+        logger.debug(
+          { invoiceId: invoice.id },
+          'invoice.payment_failed: no subscription on invoice — skipping',
+        );
+        return;
+      }
+
+      const profile = getCustomerProfileBySubscriptionId(subId);
+      if (!profile) {
+        logger.debug(
+          { subId },
+          'invoice.payment_failed: no matching profile — skipping',
+        );
+        return;
+      }
+
+      updateCustomerSubscription(profile.group_folder, {
+        subscription_status: 'past_due',
+      });
+
+      logger.info(
+        { folder: profile.group_folder },
+        'Subscription marked past_due via invoice.payment_failed',
+      );
+
+      await deps.sendMessage(
+        profile.channel_identity,
+        `There's an issue with your SoloLedger payment — the latest charge didn't go through. Please update your payment method to keep your books running. Reply /billing for a link to manage your subscription.`,
       );
       break;
     }
@@ -731,7 +883,9 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
       const s = secrets();
       const mode = s.STRIPE_MODE || 'test';
       const webhookSecret =
-        mode === 'live' ? s.STRIPE_LIVE_WEBHOOK_SECRET : s.STRIPE_TEST_WEBHOOK_SECRET;
+        mode === 'live'
+          ? s.STRIPE_LIVE_WEBHOOK_SECRET
+          : s.STRIPE_TEST_WEBHOOK_SECRET;
 
       if (!webhookSecret) {
         logger.warn('Stripe webhook secret not configured — rejecting request');
@@ -818,6 +972,36 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
     if (!public_token || !userId) {
       res.status(400).json({ error: 'public_token and userId required' });
       return;
+    }
+
+    // Capacity / waitlist check — enforce before provisioning
+    const s = secrets();
+    if (s.WAITLIST_MODE === 'true') {
+      logger.info({ userId }, 'Onboarding blocked: WAITLIST_MODE=true');
+      res.json({
+        waitlisted: true,
+        message:
+          "We're currently at capacity. We've added you to the waitlist and will reach out as soon as a spot opens up.",
+      });
+      return;
+    }
+    const maxCustomers = s.MAX_ACTIVE_CUSTOMERS
+      ? parseInt(s.MAX_ACTIVE_CUSTOMERS, 10)
+      : null;
+    if (maxCustomers !== null && !isNaN(maxCustomers)) {
+      const activeCount = countActiveCustomers();
+      if (activeCount >= maxCustomers) {
+        logger.info(
+          { userId, activeCount, maxCustomers },
+          'Onboarding blocked: MAX_ACTIVE_CUSTOMERS reached',
+        );
+        res.json({
+          waitlisted: true,
+          message:
+            "We're currently at capacity. We've added you to the waitlist and will reach out as soon as a spot opens up.",
+        });
+        return;
+      }
     }
 
     try {

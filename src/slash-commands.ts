@@ -13,9 +13,10 @@ import path from 'path';
 import { promisify } from 'util';
 
 import Database from 'better-sqlite3';
+import Stripe from 'stripe';
 
-import { GROUPS_DIR } from './config.js';
-import { getUsageSummary } from './db.js';
+import { GROUPS_DIR, PUBLIC_URL } from './config.js';
+import { getCustomerProfileByFolder, getUsageSummary } from './db.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { NewMessage, RegisteredGroup } from './types.js';
@@ -68,6 +69,11 @@ export const SLASH_COMMANDS: SlashCommandMeta[] = [
     command: '/usage',
     args: '',
     description: 'Token usage + cost by customer (last 30 days) — admin only',
+  },
+  {
+    command: '/billing',
+    args: '',
+    description: 'Get a link to manage your subscription',
   },
 ];
 
@@ -240,6 +246,39 @@ async function handleSync(group: RegisteredGroup): Promise<string> {
   }
 }
 
+async function handleBilling(group: RegisteredGroup): Promise<string> {
+  const profile = getCustomerProfileByFolder(group.folder);
+  if (!profile?.stripe_customer_id) {
+    return 'No billing account found. Contact support if this seems wrong.';
+  }
+
+  const env = readEnvFile([
+    'STRIPE_MODE',
+    'STRIPE_TEST_SECRET_KEY',
+    'STRIPE_LIVE_SECRET_KEY',
+  ]);
+  const mode = env.STRIPE_MODE || 'test';
+  const key =
+    mode === 'live' ? env.STRIPE_LIVE_SECRET_KEY : env.STRIPE_TEST_SECRET_KEY;
+  if (!key || key.length < 20) {
+    return 'Billing portal is not configured. Contact support.';
+  }
+
+  const returnUrl = PUBLIC_URL || 'https://sololedger.app';
+  const stripe = new Stripe(key);
+
+  try {
+    const session = await stripe.billingPortal.sessions.create({
+      customer: profile.stripe_customer_id,
+      return_url: returnUrl,
+    });
+    return `[Manage your subscription](${session.url})`;
+  } catch (err) {
+    logger.warn({ group: group.name, err }, 'slash /billing: Stripe error');
+    return `Could not generate billing link: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -297,6 +336,9 @@ export async function handleSlashCommand(
 
     case '/sync':
       return handleSync(group);
+
+    case '/billing':
+      return handleBilling(group);
 
     default:
       // Unknown slash — let the agent handle it naturally

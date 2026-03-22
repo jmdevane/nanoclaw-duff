@@ -121,6 +121,7 @@ function createSchema(database: Database.Database): void {
       audit_delivered_at      TEXT,
       activated_at            TEXT,
       cancelled_at            TEXT,
+      churn_prompt_sent       INTEGER NOT NULL DEFAULT 0,
       created_at              TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_profiles_stripe_customer ON customer_profiles(stripe_customer_id);
@@ -164,6 +165,15 @@ function createSchema(database: Database.Database): void {
     // Backfill: existing rows with folder = 'main' are the main group
     database.exec(
       `UPDATE registered_groups SET is_main = 1 WHERE folder = 'main'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  // Add churn_prompt_sent column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE customer_profiles ADD COLUMN churn_prompt_sent INTEGER NOT NULL DEFAULT 0`,
     );
   } catch {
     /* column already exists */
@@ -849,7 +859,12 @@ export interface CustomerProfile {
   group_folder: string;
   stripe_customer_id: string | null;
   stripe_subscription_id: string | null;
-  subscription_status: 'pending' | 'active' | 'past_due' | 'cancelled' | 'waitlisted';
+  subscription_status:
+    | 'pending'
+    | 'active'
+    | 'past_due'
+    | 'cancelled'
+    | 'waitlisted';
   plan: 'monthly' | 'annual' | null;
   current_period_end: string | null;
   email: string | null;
@@ -859,6 +874,7 @@ export interface CustomerProfile {
   audit_delivered_at: string | null;
   activated_at: string | null;
   cancelled_at: string | null;
+  churn_prompt_sent: number;
   created_at: string;
 }
 
@@ -891,7 +907,12 @@ export function updateCustomerSubscription(
   updates: {
     stripe_customer_id?: string | null;
     stripe_subscription_id?: string | null;
-    subscription_status?: 'pending' | 'active' | 'past_due' | 'cancelled' | 'waitlisted';
+    subscription_status?:
+      | 'pending'
+      | 'active'
+      | 'past_due'
+      | 'cancelled'
+      | 'waitlisted';
     plan?: 'monthly' | 'annual' | null;
     current_period_end?: string | null;
     email?: string | null;
@@ -946,6 +967,33 @@ export function updateCustomerSubscription(
   db.prepare(
     `UPDATE customer_profiles SET ${fields.join(', ')} WHERE group_folder = ?`,
   ).run(...values);
+}
+
+export function setChurnPromptSent(folder: string, value: 0 | 1): void {
+  db.prepare(
+    'UPDATE customer_profiles SET churn_prompt_sent = ? WHERE group_folder = ?',
+  ).run(value, folder);
+}
+
+export function insertChurnFeedback(
+  folder: string,
+  reasonCode: number,
+  rawReply: string,
+): void {
+  // Clamp to valid range (1-5); freeform replies use 5 (Other) with raw_reply preserved
+  const code = reasonCode >= 1 && reasonCode <= 5 ? reasonCode : 5;
+  db.prepare(
+    'INSERT INTO churn_feedback (group_folder, reason_code, raw_reply) VALUES (?, ?, ?)',
+  ).run(folder, code, rawReply);
+}
+
+export function countActiveCustomers(): number {
+  const row = db
+    .prepare(
+      "SELECT COUNT(*) AS cnt FROM customer_profiles WHERE subscription_status = 'active'",
+    )
+    .get() as { cnt: number };
+  return row.cnt;
 }
 
 export function getUsageSummary(days = 30): Array<{
