@@ -10,6 +10,7 @@ import {
 } from './container-runner.js';
 import {
   getAllTasks,
+  getCustomerProfileByFolder,
   getDueTasks,
   getTaskById,
   logTaskRun,
@@ -126,6 +127,27 @@ async function runTask(
       result: null,
       error: `Group not found: ${task.group_folder}`,
     });
+    return;
+  }
+
+  // Subscription gate — skip scheduled tasks for non-active customer groups.
+  // Groups without a customer_profiles row (e.g. operator group) always proceed.
+  const profile = getCustomerProfileByFolder(task.group_folder);
+  if (profile && profile.subscription_status !== 'active') {
+    logger.info(
+      {
+        taskId: task.id,
+        folder: task.group_folder,
+        status: profile.subscription_status,
+      },
+      'Skipping scheduled task — subscription not active',
+    );
+    const nextRun = computeNextRun(task);
+    updateTaskAfterRun(
+      task.id,
+      nextRun,
+      `Skipped: subscription_status=${profile.subscription_status}`,
+    );
     return;
   }
 

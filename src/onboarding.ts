@@ -18,6 +18,7 @@ import path from 'path';
 import { promisify } from 'util';
 
 import express, { Request, Response } from 'express';
+import { CronExpressionParser } from 'cron-parser';
 import { Configuration, PlaidApi, PlaidEnvironments } from 'plaid';
 import Stripe from 'stripe';
 
@@ -26,6 +27,7 @@ import {
   ONBOARDING_PORT,
   PUBLIC_URL,
   STRIPE_PAYMENT_LINK,
+  TIMEZONE,
 } from './config.js';
 import {
   countActiveCustomers,
@@ -34,6 +36,7 @@ import {
   getCustomerProfileByFolder,
   getCustomerProfileBySubscriptionId,
   getOnboardingSession,
+  getTasksForGroup,
   markSessionUsed,
   updateCustomerSubscription,
 } from './db.js';
@@ -42,6 +45,33 @@ import { logger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
 const PROVISION_TIMEOUT_MS = 30_000;
+
+// ---------------------------------------------------------------------------
+// Monthly close prompt — shared with slash-commands /close handler
+// ---------------------------------------------------------------------------
+
+export const MONTHLY_CLOSE_PROMPT = `Run the monthly close report for last month. Use the current date to determine last month's first and last day (YYYY-MM-DD format).
+
+Delivery order matters — complete all steps in sequence:
+
+1. Data gathering (run both, do not send yet):
+   python3 /workspace/extra/kernel/report.py pnl --from FIRST --to LAST
+   python3 /workspace/extra/kernel/report.py bs
+
+2. Waterfall chart:
+   python3 /workspace/extra/kernel/chart.py waterfall --from FIRST --to LAST
+   The very next tool call must be: mcp__nanoclaw__send_file(file_path=<returned_path>, caption="[Month Year] Income & Expenses")
+
+3. Narrative — send via mcp__nanoclaw__send_message:
+   2–3 sentences in plain prose (no bullets, no markdown headings): net income or loss for the month, the top expense category and its amount, and ending cash balance from the balance sheet.
+
+4. Month P&L — send the output from step 1 as a code block via mcp__nanoclaw__send_message.
+
+5. YTD P&L (January 1st of the current year through the last day of last month):
+   python3 /workspace/extra/kernel/report.py pnl --from YYYY-01-01 --to LAST
+   Send as a code block via mcp__nanoclaw__send_message.
+
+6. One data-driven follow-up suggestion based on what the numbers showed — send via mcp__nanoclaw__send_message.`;
 
 // ---------------------------------------------------------------------------
 // Secrets — read from .env each call (not cached — hot-reloadable)
@@ -472,7 +502,7 @@ async function handleStripeEvent(
       const subId =
         typeof invoice.subscription === 'string'
           ? invoice.subscription
-          : (invoice.subscription as Stripe.Subscription | null)?.id ?? null;
+          : ((invoice.subscription as Stripe.Subscription | null)?.id ?? null);
 
       if (!subId) {
         logger.debug(
@@ -675,9 +705,40 @@ Keep it conversational, not salesy. No bullet points — just a natural message.
     created_at: new Date().toISOString(),
   });
 
+  // Monthly close cron — 3rd of each month at 9am (TZ set via process.env.TZ)
+  // Skip if already present (e.g. re-provision)
+  const existingTasks = getTasksForGroup(session.folder);
+  const hasMonthlyClose = existingTasks.some(
+    (t) => t.schedule_type === 'cron' && t.schedule_value === '0 9 3 * *',
+  );
+  if (!hasMonthlyClose) {
+    const closeNextRun = CronExpressionParser.parse('0 9 3 * *', {
+      tz: TIMEZONE,
+    })
+      .next()
+      .toISOString();
+    const closeId = `monthly-close-${session.folder}`;
+    createTask({
+      id: closeId,
+      group_folder: session.folder,
+      chat_jid: chatJid,
+      prompt: MONTHLY_CLOSE_PROMPT,
+      schedule_type: 'cron',
+      schedule_value: '0 9 3 * *',
+      context_mode: 'isolated',
+      next_run: closeNextRun,
+      status: 'active',
+      created_at: new Date().toISOString(),
+    });
+    logger.info(
+      { chatJid, folder: session.folder, closeId, closeNextRun },
+      'Monthly close cron task scheduled',
+    );
+  }
+
   logger.info(
     { chatJid, folder: session.folder, auditId, recipeId },
-    'Onboarding complete — audit and recipe tasks scheduled',
+    'Onboarding complete — audit, recipe, and monthly close tasks scheduled',
   );
 }
 

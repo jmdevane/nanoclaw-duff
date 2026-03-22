@@ -16,7 +16,13 @@ import Database from 'better-sqlite3';
 import Stripe from 'stripe';
 
 import { GROUPS_DIR, PUBLIC_URL } from './config.js';
-import { getCustomerProfileByFolder, getUsageSummary } from './db.js';
+import {
+  createTask,
+  getCustomerProfileByFolder,
+  getRegisteredGroupByFolder,
+  getUsageSummary,
+} from './db.js';
+import { MONTHLY_CLOSE_PROMPT } from './onboarding.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 import { NewMessage, RegisteredGroup } from './types.js';
@@ -210,6 +216,41 @@ async function handleAccounts(group: RegisteredGroup): Promise<string> {
   }
 }
 
+function handleClose(
+  subArg: string | undefined,
+  group: RegisteredGroup,
+  chatJid: string,
+): string {
+  let targetFolder = group.folder;
+  let targetJid = chatJid;
+
+  if (subArg) {
+    const target = getRegisteredGroupByFolder(subArg);
+    if (!target) {
+      return `No group found with folder "${subArg}".`;
+    }
+    targetFolder = target.folder;
+    targetJid = target.jid;
+  }
+
+  const taskId = `manual-close-${targetFolder}-${Date.now()}`;
+  createTask({
+    id: taskId,
+    group_folder: targetFolder,
+    chat_jid: targetJid,
+    prompt: MONTHLY_CLOSE_PROMPT,
+    schedule_type: 'once',
+    schedule_value: new Date().toISOString(),
+    context_mode: 'isolated',
+    next_run: new Date().toISOString(),
+    status: 'active',
+    created_at: new Date().toISOString(),
+  });
+
+  const label = subArg ? `group \`${targetFolder}\`` : 'this group';
+  return `Monthly close queued for ${label} — report will arrive shortly.`;
+}
+
 function handleUsage(): string {
   const rows = getUsageSummary(30);
   if (rows.length === 0) {
@@ -313,6 +354,8 @@ export async function handleSlashCommand(
     switch (cmd) {
       case '/usage':
         return handleUsage();
+      case '/close':
+        return handleClose(subArg, group, lastUser.chat_jid);
       default:
         return null;
     }
