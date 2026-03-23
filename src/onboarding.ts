@@ -98,7 +98,10 @@ function secrets() {
     'STRIPE_LIVE_SECRET_KEY',
     'STRIPE_TEST_WEBHOOK_SECRET',
     'STRIPE_LIVE_WEBHOOK_SECRET',
-    'STRIPE_PRICE_ID',
+    'STRIPE_TEST_PAYMENT_LINK_MONTHLY',
+    'STRIPE_TEST_PAYMENT_LINK_ANNUAL',
+    'STRIPE_LIVE_PAYMENT_LINK_MONTHLY',
+    'STRIPE_LIVE_PAYMENT_LINK_ANNUAL',
     'SOLOLEDGER_KERNEL_PATH',
     'SOLOLEDGER_MASTER_KEY',
     'WAITLIST_MODE',
@@ -445,52 +448,32 @@ async function runProvision(
 
 // ---------------------------------------------------------------------------
 // Stripe — resolve checkout URL
-// Prefers static STRIPE_PAYMENT_LINK (set once in Stripe dashboard, never expires).
-// Falls back to dynamic Checkout session if only STRIPE_PRICE_ID is configured.
+// Payment Link checkout URLs — append client_reference_id per customer.
+// No API call needed; links never expire.
 // ---------------------------------------------------------------------------
 
-async function resolveCheckoutUrl(
-  chatJid: string,
-  folder: string,
-): Promise<string | null> {
-  // Always prefer a dynamic session for the onboarding checkout — it guarantees
-  // client_reference_id and metadata are set on the session so the webhook can
-  // reliably match back to this customer's folder.
-  // Static STRIPE_PAYMENT_LINK is used only for re-subscribe gating messages
-  // (see index.ts) where per-customer metadata isn't needed.
-  return tryCreateStripeCheckout(chatJid, folder);
-}
-
-async function tryCreateStripeCheckout(
-  chatJid: string,
-  folder: string,
-): Promise<string | null> {
+function resolveCheckoutUrls(folder: string): { monthly: string; annual: string } {
   const s = secrets();
-  const priceId = s.STRIPE_PRICE_ID;
-  if (!priceId) return null;
+  const isLive = (s.STRIPE_MODE || 'test') === 'live';
+  const monthlyLink = isLive
+    ? (s.STRIPE_LIVE_PAYMENT_LINK_MONTHLY || '')
+    : (s.STRIPE_TEST_PAYMENT_LINK_MONTHLY || '');
+  const annualLink = isLive
+    ? (s.STRIPE_LIVE_PAYMENT_LINK_ANNUAL || '')
+    : (s.STRIPE_TEST_PAYMENT_LINK_ANNUAL || '');
 
-  const stripe = makeStripeClient();
-  if (!stripe) return null;
+  const withRef = (url: string): string => {
+    if (!url) return '';
+    try {
+      const u = new URL(url);
+      u.searchParams.set('client_reference_id', folder);
+      return u.toString();
+    } catch {
+      return url;
+    }
+  };
 
-  const publicUrl = PUBLIC_URL || `http://localhost:${ONBOARDING_PORT}`;
-
-  try {
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      line_items: [{ price: priceId, quantity: 1 }],
-      success_url: `${publicUrl}/checkout/success`,
-      cancel_url: `${publicUrl}/checkout/cancel`,
-      client_reference_id: folder,
-      metadata: { folder, chatJid },
-    });
-    return session.url;
-  } catch (err) {
-    logger.error(
-      { err: err instanceof Error ? err.message : String(err) },
-      'Stripe checkout session creation failed',
-    );
-    return null;
-  }
+  return { monthly: withRef(monthlyLink), annual: withRef(annualLink) };
 }
 
 // ---------------------------------------------------------------------------
@@ -535,12 +518,15 @@ async function handleStripeEvent(
           ? session.subscription
           : ((session.subscription as Stripe.Subscription | null)?.id ?? null);
       const email = session.customer_details?.email ?? null;
-      // company_name from Stripe custom_fields (configured on the Payment Link
-      // in the Stripe dashboard as a custom field with key "company_name")
+      // company_name: try Stripe's built-in business name field (key varies),
+      // then the old custom field key, then customer_details.name as fallback.
       const companyField = (session.custom_fields ?? []).find(
-        (f) => f.key === 'company_name',
+        (f) => f.key === 'business_name' || f.key === 'company_name',
       );
-      const companyName = companyField?.text?.value ?? null;
+      const companyName =
+        companyField?.text?.value ??
+        session.customer_details?.name ??
+        null;
 
       updateCustomerSubscription(folder, {
         stripe_customer_id: stripeCustomerId,
@@ -805,8 +791,8 @@ export async function handleTelegramStart(
   // Reload in-memory registered groups so this JID starts receiving messages
   deps.loadGroups();
 
-  // Fetch checkout URL before creating the audit task — needed for PDF CTA.
-  const checkoutUrl = await resolveCheckoutUrl(chatJid, session.folder);
+  // Resolve checkout URLs (Payment Links + client_reference_id)
+  const checkoutUrls = resolveCheckoutUrls(session.folder);
 
   // 30-day retro audit task — fires in 20 seconds.
   // Generates a branded PDF via audit_pdf.py, sends text teaser first, then the PDF.
@@ -829,7 +815,7 @@ Run the initial 30-day onboarding audit for a new customer. Steps in order:
 
 3. Generate the audit PDF:
    python3 /workspace/extra/kernel/audit_pdf.py \\
-     --checkout-url "${checkoutUrl || ''}" \\
+     --checkout-url "${checkoutUrls.monthly}" \\
      --assistant-name "${ASSISTANT_NAME}" \\
      --product-name "${PRODUCT_NAME}" \\
      --product-url "${PRODUCT_URL}"
@@ -852,9 +838,9 @@ Do not send any additional messages.`,
 
   // Direct checkout message after 3 min — second CTA touchpoint, bypasses agent
   // (model content filters block Stripe URLs in task prompts).
-  if (checkoutUrl) {
+  if (checkoutUrls.monthly) {
     const checkoutJid = chatJid;
-    const checkoutMsg = `Ready to make it official? [Start your SoloLedger subscription here](${checkoutUrl})`;
+    const checkoutMsg = `Ready to make it official? [Start your subscription here](${checkoutUrls.monthly})`;
     setTimeout(
       () => {
         deps
@@ -870,7 +856,7 @@ Do not send any additional messages.`,
     );
     logger.info(
       { chatJid, folder: session.folder },
-      'Checkout URL scheduled (direct send, 3 min)',
+      'Checkout URLs scheduled (direct send, 3 min)',
     );
   }
 

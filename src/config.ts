@@ -14,7 +14,10 @@ const envConfig = readEnvFile([
   'ONBOARDING_SECRET',
   'PLAID_ENV',
   'STRIPE_MODE',
-  'STRIPE_PAYMENT_LINK',
+  'STRIPE_TEST_PAYMENT_LINK_MONTHLY',
+  'STRIPE_TEST_PAYMENT_LINK_ANNUAL',
+  'STRIPE_LIVE_PAYMENT_LINK_MONTHLY',
+  'STRIPE_LIVE_PAYMENT_LINK_ANNUAL',
   'PRODUCT_NAME',
   'PRODUCT_URL',
   'TZ',
@@ -90,8 +93,17 @@ export const PLAID_ENV =
   process.env.PLAID_ENV || envConfig.PLAID_ENV || 'sandbox';
 export const STRIPE_MODE =
   process.env.STRIPE_MODE || envConfig.STRIPE_MODE || 'test';
-export const STRIPE_PAYMENT_LINK =
-  process.env.STRIPE_PAYMENT_LINK || envConfig.STRIPE_PAYMENT_LINK || '';
+
+// Mode-aware payment links — resolved at startup based on STRIPE_MODE
+const _isLive = STRIPE_MODE === 'live';
+export const STRIPE_PAYMENT_LINK_MONTHLY = _isLive
+  ? (process.env.STRIPE_LIVE_PAYMENT_LINK_MONTHLY || envConfig.STRIPE_LIVE_PAYMENT_LINK_MONTHLY || '')
+  : (process.env.STRIPE_TEST_PAYMENT_LINK_MONTHLY || envConfig.STRIPE_TEST_PAYMENT_LINK_MONTHLY || '');
+export const STRIPE_PAYMENT_LINK_ANNUAL = _isLive
+  ? (process.env.STRIPE_LIVE_PAYMENT_LINK_ANNUAL || envConfig.STRIPE_LIVE_PAYMENT_LINK_ANNUAL || '')
+  : (process.env.STRIPE_TEST_PAYMENT_LINK_ANNUAL || envConfig.STRIPE_TEST_PAYMENT_LINK_ANNUAL || '');
+// Alias for backwards compat — used in re-subscribe gating messages
+export const STRIPE_PAYMENT_LINK = STRIPE_PAYMENT_LINK_MONTHLY;
 export const PRODUCT_NAME =
   process.env.PRODUCT_NAME || envConfig.PRODUCT_NAME || 'Judy';
 export const PRODUCT_URL =
