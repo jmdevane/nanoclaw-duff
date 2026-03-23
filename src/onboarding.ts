@@ -1216,6 +1216,18 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
         expires_at: expiresAt.toISOString(),
       });
 
+      // Register webhook URL on the Plaid Item so we receive SYNC_UPDATES_AVAILABLE
+      const webhookUrl = `${PUBLIC_URL}/webhooks/plaid`;
+      try {
+        await plaid.itemWebhookUpdate({
+          access_token: accessToken,
+          webhook: webhookUrl,
+        });
+        logger.info({ sessionId, folder, itemId }, 'Plaid webhook URL registered');
+      } catch (err) {
+        logger.warn({ err, webhookUrl }, 'Failed to register Plaid webhook URL — continuing');
+      }
+
       const s = secrets();
       const botUsername = s.BOT_USERNAME || '';
       const telegramLink = botUsername

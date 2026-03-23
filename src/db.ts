@@ -187,6 +187,13 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add plaid_item_id column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(`ALTER TABLE customer_profiles ADD COLUMN plaid_item_id TEXT`);
+  } catch {
+    /* column already exists */
+  }
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
@@ -479,7 +486,12 @@ export function updateTask(
   updates: Partial<
     Pick<
       ScheduledTask,
-      'prompt' | 'schedule_type' | 'schedule_value' | 'next_run' | 'status' | 'model'
+      | 'prompt'
+      | 'schedule_type'
+      | 'schedule_value'
+      | 'next_run'
+      | 'status'
+      | 'model'
     >
   >,
 ): void {
@@ -922,6 +934,7 @@ export interface CustomerProfile {
   activated_at: string | null;
   cancelled_at: string | null;
   churn_prompt_sent: number;
+  plaid_item_id: string | null;
   created_at: string;
 }
 
@@ -947,6 +960,14 @@ export function getCustomerProfileByStripeCustomerId(
   return db
     .prepare('SELECT * FROM customer_profiles WHERE stripe_customer_id = ?')
     .get(custId) as CustomerProfile | undefined;
+}
+
+export function getCustomerProfileByPlaidItemId(
+  itemId: string,
+): CustomerProfile | undefined {
+  return db
+    .prepare('SELECT * FROM customer_profiles WHERE plaid_item_id = ?')
+    .get(itemId) as CustomerProfile | undefined;
 }
 
 export function updateCustomerSubscription(
