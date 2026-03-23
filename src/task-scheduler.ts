@@ -1,8 +1,13 @@
-import { ChildProcess } from 'child_process';
+import { ChildProcess, execFile } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import fs from 'fs';
+import path from 'path';
+import { promisify } from 'util';
 
-import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import { readEnvFile } from './env.js';
+
+const execFileAsync = promisify(execFile);
 import {
   ContainerOutput,
   runContainerAgent,
@@ -148,6 +153,102 @@ async function runTask(
       nextRun,
       `Skipped: subscription_status=${profile.subscription_status}`,
     );
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // kernel_nudge: direct kernel call — no container, no LLM.
+  // Checks for uncategorized transactions; sends a review list only if any exist.
+  // ---------------------------------------------------------------------------
+  if (task.task_kind === 'kernel_nudge') {
+    try {
+      const env = readEnvFile(['SOLOLEDGER_MASTER_KEY', 'SOLOLEDGER_KERNEL_PATH']);
+      const kernelDir =
+        env.SOLOLEDGER_KERNEL_PATH || path.resolve(process.cwd(), '..', 'kernel');
+      const ledger = path.join(GROUPS_DIR, task.group_folder, 'ledger.db');
+      const execEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        LEDGER_DB: ledger,
+        ...(env.SOLOLEDGER_MASTER_KEY
+          ? { SOLOLEDGER_MASTER_KEY: env.SOLOLEDGER_MASTER_KEY }
+          : {}),
+      };
+
+      const { stdout } = await execFileAsync(
+        'python3',
+        [path.join(kernelDir, 'categorize.py'), 'pending', '--json'],
+        { env: execEnv, timeout: 30_000 },
+      );
+
+      const raw = stdout.trim();
+      let rows: Array<{
+        id: string;
+        transaction_date: string;
+        amount_cents: number;
+        raw_description: string;
+      }> = [];
+      try {
+        rows = JSON.parse(raw);
+      } catch {
+        rows = [];
+      }
+
+      const nextRun = computeNextRun(task);
+      if (rows.length === 0) {
+        // Nothing pending — advance silently, no message
+        updateTaskAfterRun(task.id, nextRun, 'Silent: no pending transactions');
+        logTaskRun({
+          task_id: task.id,
+          run_at: new Date().toISOString(),
+          duration_ms: Date.now() - startTime,
+          status: 'success',
+          result: null,
+          error: null,
+        });
+        return;
+      }
+
+      // Format and send review list
+      const lines = [
+        `*${rows.length} transaction${rows.length === 1 ? '' : 's'} need your input:*`,
+        '',
+      ];
+      rows.slice(0, 20).forEach((r, i) => {
+        const amount = Math.abs(r.amount_cents) / 100;
+        const sign = r.amount_cents > 0 ? '-' : '+';
+        const desc = (r.raw_description || r.id).slice(0, 40);
+        lines.push(`${i + 1}. ${desc} — ${sign}$${amount.toFixed(2)}`);
+      });
+      if (rows.length > 20) lines.push(`…and ${rows.length - 20} more.`);
+      lines.push('');
+      lines.push(
+        'Reply with categories, e.g. "1=supplies 2=meals 3=owner draw" — or just tell me what each one is.',
+      );
+      const msg = lines.join('\n');
+
+      await deps.sendMessage(task.chat_jid, msg);
+      updateTaskAfterRun(task.id, nextRun, `Nudge sent: ${rows.length} pending`);
+      logTaskRun({
+        task_id: task.id,
+        run_at: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        status: 'success',
+        result: msg.slice(0, 200),
+        error: null,
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      logger.error({ taskId: task.id, error }, 'kernel_nudge task failed');
+      logTaskRun({
+        task_id: task.id,
+        run_at: new Date().toISOString(),
+        duration_ms: Date.now() - startTime,
+        status: 'error',
+        result: null,
+        error,
+      });
+      updateTaskAfterRun(task.id, computeNextRun(task), `Error: ${error}`);
+    }
     return;
   }
 

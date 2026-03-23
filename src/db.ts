@@ -178,6 +178,15 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  // Add task_kind column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN task_kind TEXT DEFAULT 'agent'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
   // Add churn_prompt_sent column if it doesn't exist (migration for existing DBs)
   try {
     database.exec(
@@ -445,8 +454,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at, model)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at, model, task_kind)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -460,6 +469,7 @@ export function createTask(
     task.status,
     task.created_at,
     task.model ?? null,
+    task.task_kind ?? 'agent',
   );
 }
 

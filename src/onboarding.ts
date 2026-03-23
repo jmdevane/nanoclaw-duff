@@ -225,6 +225,33 @@ export function seedScheduledTasks(folder: string, chatJid: string): void {
     });
     logger.info({ folder, chatJid }, 'Seeded weekly-sync task');
   }
+
+  // Daily nudge — 6pm CST, kernel_nudge (no container, no LLM)
+  // Sends a review list only if uncategorized transactions exist; silent otherwise.
+  const hasDailyNudge = existingTasks.some(
+    (t) => t.schedule_type === 'cron' && t.schedule_value === '0 18 * * *',
+  );
+  if (!hasDailyNudge) {
+    const nudgeNextRun = CronExpressionParser.parse('0 18 * * *', {
+      tz: TIMEZONE,
+    })
+      .next()
+      .toISOString();
+    createTask({
+      id: `daily-nudge-${folder}`,
+      group_folder: folder,
+      chat_jid: chatJid,
+      prompt: 'daily_nudge',
+      schedule_type: 'cron',
+      schedule_value: '0 18 * * *',
+      context_mode: 'isolated',
+      next_run: nudgeNextRun,
+      status: 'active',
+      task_kind: 'kernel_nudge',
+      created_at: new Date().toISOString(),
+    });
+    logger.info({ folder, chatJid }, 'Seeded daily-nudge task');
+  }
 }
 
 /**
@@ -1124,10 +1151,7 @@ async function verifyPlaidWebhook(
     const payload = JSON.parse(
       Buffer.from(payloadB64, 'base64url').toString('utf8'),
     );
-    const bodyHash = crypto
-      .createHash('sha256')
-      .update(rawBody)
-      .digest('hex');
+    const bodyHash = crypto.createHash('sha256').update(rawBody).digest('hex');
     return payload.request_body_sha256 === bodyHash;
   } catch (err) {
     logger.warn({ err }, 'Plaid webhook JWT verification error');
@@ -1165,28 +1189,43 @@ async function runKernelSilent(
   return stdout.trim();
 }
 
-async function handlePlaidTransactionSync(
-  itemId: string,
-): Promise<void> {
+async function handlePlaidTransactionSync(itemId: string): Promise<void> {
   const profile = getCustomerProfileByPlaidItemId(itemId);
   if (!profile) {
-    logger.warn({ itemId }, 'Plaid SYNC_UPDATES_AVAILABLE: no customer for item_id');
+    logger.warn(
+      { itemId },
+      'Plaid SYNC_UPDATES_AVAILABLE: no customer for item_id',
+    );
     return;
   }
   const group = getRegisteredGroupByFolder(profile.group_folder);
   if (!group) {
-    logger.warn({ itemId, folder: profile.group_folder }, 'Plaid SYNC_UPDATES_AVAILABLE: group not found');
+    logger.warn(
+      { itemId, folder: profile.group_folder },
+      'Plaid SYNC_UPDATES_AVAILABLE: group not found',
+    );
     return;
   }
 
-  logger.info({ folder: profile.group_folder, itemId }, 'Plaid SYNC_UPDATES_AVAILABLE — running silent ingest');
+  logger.info(
+    { folder: profile.group_folder, itemId },
+    'Plaid SYNC_UPDATES_AVAILABLE — running silent ingest',
+  );
 
   try {
     await runKernelSilent('ingest.py', ['sync', profile.group_folder], group);
 
-    const suggestRaw = await runKernelSilent('categorize.py', ['suggest'], group);
+    const suggestRaw = await runKernelSilent(
+      'categorize.py',
+      ['suggest'],
+      group,
+    );
     const suggestions = JSON.parse(suggestRaw) as {
-      auto: Array<{ txn_id: string; suggested_account: string; credit_account: string }>;
+      auto: Array<{
+        txn_id: string;
+        suggested_account: string;
+        credit_account: string;
+      }>;
       review: unknown[];
       total: number;
       auto_count: number;
@@ -1217,7 +1256,10 @@ async function handlePlaidTransactionSync(
       'Plaid silent ingest complete',
     );
   } catch (err) {
-    logger.error({ err, folder: profile.group_folder }, 'Plaid silent ingest failed');
+    logger.error(
+      { err, folder: profile.group_folder },
+      'Plaid silent ingest failed',
+    );
   }
 }
 
@@ -1325,7 +1367,11 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
       };
 
       logger.info(
-        { type: body.webhook_type, code: body.webhook_code, itemId: body.item_id },
+        {
+          type: body.webhook_type,
+          code: body.webhook_code,
+          itemId: body.item_id,
+        },
         'Plaid webhook received',
       );
 
