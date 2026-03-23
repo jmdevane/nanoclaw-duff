@@ -97,11 +97,19 @@ export const STRIPE_MODE =
 // Mode-aware payment links — resolved at startup based on STRIPE_MODE
 const _isLive = STRIPE_MODE === 'live';
 export const STRIPE_PAYMENT_LINK_MONTHLY = _isLive
-  ? (process.env.STRIPE_LIVE_PAYMENT_LINK_MONTHLY || envConfig.STRIPE_LIVE_PAYMENT_LINK_MONTHLY || '')
-  : (process.env.STRIPE_TEST_PAYMENT_LINK_MONTHLY || envConfig.STRIPE_TEST_PAYMENT_LINK_MONTHLY || '');
+  ? process.env.STRIPE_LIVE_PAYMENT_LINK_MONTHLY ||
+    envConfig.STRIPE_LIVE_PAYMENT_LINK_MONTHLY ||
+    ''
+  : process.env.STRIPE_TEST_PAYMENT_LINK_MONTHLY ||
+    envConfig.STRIPE_TEST_PAYMENT_LINK_MONTHLY ||
+    '';
 export const STRIPE_PAYMENT_LINK_ANNUAL = _isLive
-  ? (process.env.STRIPE_LIVE_PAYMENT_LINK_ANNUAL || envConfig.STRIPE_LIVE_PAYMENT_LINK_ANNUAL || '')
-  : (process.env.STRIPE_TEST_PAYMENT_LINK_ANNUAL || envConfig.STRIPE_TEST_PAYMENT_LINK_ANNUAL || '');
+  ? process.env.STRIPE_LIVE_PAYMENT_LINK_ANNUAL ||
+    envConfig.STRIPE_LIVE_PAYMENT_LINK_ANNUAL ||
+    ''
+  : process.env.STRIPE_TEST_PAYMENT_LINK_ANNUAL ||
+    envConfig.STRIPE_TEST_PAYMENT_LINK_ANNUAL ||
+    '';
 // Alias for backwards compat — used in re-subscribe gating messages
 export const STRIPE_PAYMENT_LINK = STRIPE_PAYMENT_LINK_MONTHLY;
 export const PRODUCT_NAME =

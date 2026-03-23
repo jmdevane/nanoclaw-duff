@@ -452,15 +452,18 @@ async function runProvision(
 // No API call needed; links never expire.
 // ---------------------------------------------------------------------------
 
-function resolveCheckoutUrls(folder: string): { monthly: string; annual: string } {
+function resolveCheckoutUrls(folder: string): {
+  monthly: string;
+  annual: string;
+} {
   const s = secrets();
   const isLive = (s.STRIPE_MODE || 'test') === 'live';
   const monthlyLink = isLive
-    ? (s.STRIPE_LIVE_PAYMENT_LINK_MONTHLY || '')
-    : (s.STRIPE_TEST_PAYMENT_LINK_MONTHLY || '');
+    ? s.STRIPE_LIVE_PAYMENT_LINK_MONTHLY || ''
+    : s.STRIPE_TEST_PAYMENT_LINK_MONTHLY || '';
   const annualLink = isLive
-    ? (s.STRIPE_LIVE_PAYMENT_LINK_ANNUAL || '')
-    : (s.STRIPE_TEST_PAYMENT_LINK_ANNUAL || '');
+    ? s.STRIPE_LIVE_PAYMENT_LINK_ANNUAL || ''
+    : s.STRIPE_TEST_PAYMENT_LINK_ANNUAL || '';
 
   const withRef = (url: string): string => {
     if (!url) return '';
@@ -524,9 +527,7 @@ async function handleStripeEvent(
         (f) => f.key === 'business_name' || f.key === 'company_name',
       );
       const companyName =
-        companyField?.text?.value ??
-        session.customer_details?.name ??
-        null;
+        companyField?.text?.value ?? session.customer_details?.name ?? null;
 
       updateCustomerSubscription(folder, {
         stripe_customer_id: stripeCustomerId,
