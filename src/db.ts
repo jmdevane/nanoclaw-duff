@@ -189,7 +189,9 @@ function createSchema(database: Database.Database): void {
 
   // Add plaid_item_id column if it doesn't exist (migration for existing DBs)
   try {
-    database.exec(`ALTER TABLE customer_profiles ADD COLUMN plaid_item_id TEXT`);
+    database.exec(
+      `ALTER TABLE customer_profiles ADD COLUMN plaid_item_id TEXT`,
+    );
   } catch {
     /* column already exists */
   }
@@ -681,6 +683,39 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.requiresTrigger === undefined ? 1 : group.requiresTrigger ? 1 : 0,
     group.isMain ? 1 : 0,
   );
+}
+
+export function getMainGroup():
+  | (RegisteredGroup & { jid: string })
+  | undefined {
+  const row = db
+    .prepare('SELECT * FROM registered_groups WHERE is_main = 1 LIMIT 1')
+    .get() as
+    | {
+        jid: string;
+        name: string;
+        folder: string;
+        trigger_pattern: string;
+        added_at: string;
+        container_config: string | null;
+        requires_trigger: number | null;
+        is_main: number | null;
+      }
+    | undefined;
+  if (!row) return undefined;
+  return {
+    jid: row.jid,
+    name: row.name,
+    folder: row.folder,
+    trigger: row.trigger_pattern,
+    added_at: row.added_at,
+    containerConfig: row.container_config
+      ? JSON.parse(row.container_config)
+      : undefined,
+    requiresTrigger:
+      row.requires_trigger === null ? undefined : row.requires_trigger === 1,
+    isMain: true,
+  };
 }
 
 export function getRegisteredGroupByFolder(

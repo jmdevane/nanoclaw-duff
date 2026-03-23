@@ -16,6 +16,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import path from 'path';
 import { promisify } from 'util';
+import type { RegisteredGroup } from './types.js';
 
 import express, { Request, Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
@@ -24,6 +25,7 @@ import Stripe from 'stripe';
 
 import {
   ASSISTANT_NAME,
+  GROUPS_DIR,
   ONBOARDING_PORT,
   PRODUCT_NAME,
   PRODUCT_URL,
@@ -37,7 +39,9 @@ import {
   createTask,
   getAllRegisteredGroups,
   getCustomerProfileByFolder,
+  getCustomerProfileByPlaidItemId,
   getCustomerProfileBySubscriptionId,
+  getMainGroup,
   getOnboardingSession,
   getRegisteredGroupByFolder,
   getTasksForGroup,
@@ -1059,6 +1063,179 @@ function landingPage(publicUrl: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Plaid webhook verification (JWT / ES256)
+// ---------------------------------------------------------------------------
+
+// Cache: kid → { key: CryptoKey (any — Web Crypto API), expiredAt: ms timestamp }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const plaidKeyCache = new Map<string, { key: any; expiredAt: number }>();
+
+async function verifyPlaidWebhook(
+  rawBody: Buffer,
+  jwtToken: string | undefined,
+  plaid: PlaidApi,
+): Promise<boolean> {
+  if (!jwtToken) return false;
+  try {
+    const parts = jwtToken.split('.');
+    if (parts.length !== 3) return false;
+    const [headerB64, payloadB64, sigB64] = parts;
+
+    const header = JSON.parse(
+      Buffer.from(headerB64, 'base64url').toString('utf8'),
+    );
+    const kid: string = header.kid;
+    if (!kid || header.alg !== 'ES256') return false;
+
+    // Fetch / cache the verification key
+    const now = Date.now();
+    let cached = plaidKeyCache.get(kid);
+    if (!cached || cached.expiredAt < now) {
+      const res = await plaid.webhookVerificationKeyGet({ key_id: kid });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const jwk = res.data.key as any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const cryptoKey = await (crypto.webcrypto as any).subtle.importKey(
+        'jwk',
+        jwk,
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['verify'],
+      );
+      const expiredAt = jwk.expired_at
+        ? new Date(jwk.expired_at as string).getTime()
+        : now + 5 * 60 * 1000;
+      cached = { key: cryptoKey, expiredAt };
+      plaidKeyCache.set(kid, cached);
+    }
+
+    // Verify ES256 signature over "headerB64.payloadB64"
+    const signingInput = Buffer.from(`${headerB64}.${payloadB64}`);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const isValid = await (crypto.webcrypto as any).subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      cached.key,
+      Buffer.from(sigB64, 'base64url'),
+      signingInput,
+    );
+    if (!isValid) return false;
+
+    // Verify body hash matches JWT claim
+    const payload = JSON.parse(
+      Buffer.from(payloadB64, 'base64url').toString('utf8'),
+    );
+    const bodyHash = crypto
+      .createHash('sha256')
+      .update(rawBody)
+      .digest('hex');
+    return payload.request_body_sha256 === bodyHash;
+  } catch (err) {
+    logger.warn({ err }, 'Plaid webhook JWT verification error');
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plaid webhook — silent background ingest
+// ---------------------------------------------------------------------------
+
+const KERNEL_EXEC_TIMEOUT_MS = 60_000;
+
+async function runKernelSilent(
+  script: string,
+  args: string[],
+  group: RegisteredGroup & { jid: string },
+): Promise<string> {
+  const s = secrets();
+  const kernelDir =
+    s.SOLOLEDGER_KERNEL_PATH || path.resolve(process.cwd(), '..', 'kernel');
+  const ledger = path.join(GROUPS_DIR, group.folder, 'ledger.db');
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    LEDGER_DB: ledger,
+    ...(s.SOLOLEDGER_MASTER_KEY
+      ? { SOLOLEDGER_MASTER_KEY: s.SOLOLEDGER_MASTER_KEY }
+      : {}),
+  };
+  const { stdout } = await execFileAsync(
+    'python3',
+    [path.join(kernelDir, script), ...args],
+    { env, timeout: KERNEL_EXEC_TIMEOUT_MS },
+  );
+  return stdout.trim();
+}
+
+async function handlePlaidTransactionSync(
+  itemId: string,
+): Promise<void> {
+  const profile = getCustomerProfileByPlaidItemId(itemId);
+  if (!profile) {
+    logger.warn({ itemId }, 'Plaid SYNC_UPDATES_AVAILABLE: no customer for item_id');
+    return;
+  }
+  const group = getRegisteredGroupByFolder(profile.group_folder);
+  if (!group) {
+    logger.warn({ itemId, folder: profile.group_folder }, 'Plaid SYNC_UPDATES_AVAILABLE: group not found');
+    return;
+  }
+
+  logger.info({ folder: profile.group_folder, itemId }, 'Plaid SYNC_UPDATES_AVAILABLE — running silent ingest');
+
+  try {
+    await runKernelSilent('ingest.py', ['sync', profile.group_folder], group);
+
+    const suggestRaw = await runKernelSilent('categorize.py', ['suggest'], group);
+    const suggestions = JSON.parse(suggestRaw) as {
+      auto: Array<{ txn_id: string; suggested_account: string; credit_account: string }>;
+      review: unknown[];
+      total: number;
+      auto_count: number;
+      review_count: number;
+    };
+
+    let autoPosted = 0;
+    for (const item of suggestions.auto ?? []) {
+      try {
+        await runKernelSilent(
+          'categorize.py',
+          ['post', item.txn_id, item.suggested_account, item.credit_account],
+          group,
+        );
+        autoPosted++;
+      } catch (err) {
+        logger.warn({ err, txnId: item.txn_id }, 'Silent auto-post failed');
+      }
+    }
+
+    logger.info(
+      {
+        folder: profile.group_folder,
+        total: suggestions.total,
+        autoPosted,
+        review: suggestions.review_count,
+      },
+      'Plaid silent ingest complete',
+    );
+  } catch (err) {
+    logger.error({ err, folder: profile.group_folder }, 'Plaid silent ingest failed');
+  }
+}
+
+async function notifyAdminPlaidItemIssue(
+  itemId: string,
+  code: string,
+  error: unknown,
+  deps: OnboardingDeps,
+): Promise<void> {
+  const admin = getMainGroup();
+  if (!admin) return;
+  const profile = getCustomerProfileByPlaidItemId(itemId);
+  const folder = profile?.group_folder ?? `unknown (item: ${itemId})`;
+  const msg = `Plaid ITEM ${code} for *${folder}*${error ? `\n\`${JSON.stringify(error)}\`` : ''}`;
+  await deps.sendMessage(admin.jid, msg);
+}
+
+// ---------------------------------------------------------------------------
 // Express server
 // ---------------------------------------------------------------------------
 
@@ -1116,6 +1293,61 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
           'Stripe webhook handler error',
         ),
       );
+    },
+  );
+
+  // Plaid webhook — raw body MUST be registered BEFORE express.json() middleware.
+  app.post(
+    '/webhooks/plaid',
+    express.raw({ type: 'application/json' }),
+    async (req: Request, res: Response) => {
+      const plaid = makePlaidClient();
+      const jwtToken = req.headers['plaid-verification'] as string | undefined;
+      const isValid = await verifyPlaidWebhook(
+        req.body as Buffer,
+        jwtToken,
+        plaid,
+      );
+      if (!isValid) {
+        logger.warn('Plaid webhook JWT verification failed');
+        res.status(400).send('Invalid signature');
+        return;
+      }
+
+      // Acknowledge immediately — Plaid retries on non-2xx or timeout
+      res.json({ received: true });
+
+      const body = JSON.parse((req.body as Buffer).toString('utf8')) as {
+        webhook_type: string;
+        webhook_code: string;
+        item_id: string;
+        error?: unknown;
+      };
+
+      logger.info(
+        { type: body.webhook_type, code: body.webhook_code, itemId: body.item_id },
+        'Plaid webhook received',
+      );
+
+      if (
+        body.webhook_type === 'TRANSACTIONS' &&
+        body.webhook_code === 'SYNC_UPDATES_AVAILABLE'
+      ) {
+        handlePlaidTransactionSync(body.item_id).catch((err) =>
+          logger.error({ err }, 'Plaid transaction sync handler error'),
+        );
+      } else if (
+        body.webhook_type === 'ITEM' &&
+        (body.webhook_code === 'ERROR' ||
+          body.webhook_code === 'PENDING_EXPIRATION')
+      ) {
+        notifyAdminPlaidItemIssue(
+          body.item_id,
+          body.webhook_code,
+          body.error,
+          deps,
+        ).catch((err) => logger.error({ err }, 'Plaid item alert error'));
+      }
     },
   );
 
@@ -1223,9 +1455,15 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
           access_token: accessToken,
           webhook: webhookUrl,
         });
-        logger.info({ sessionId, folder, itemId }, 'Plaid webhook URL registered');
+        logger.info(
+          { sessionId, folder, itemId },
+          'Plaid webhook URL registered',
+        );
       } catch (err) {
-        logger.warn({ err, webhookUrl }, 'Failed to register Plaid webhook URL — continuing');
+        logger.warn(
+          { err, webhookUrl },
+          'Failed to register Plaid webhook URL — continuing',
+        );
       }
 
       const s = secrets();
