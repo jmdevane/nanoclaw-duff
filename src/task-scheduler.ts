@@ -4,7 +4,12 @@ import fs from 'fs';
 import path from 'path';
 import { promisify } from 'util';
 
-import { ASSISTANT_NAME, GROUPS_DIR, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
+import {
+  ASSISTANT_NAME,
+  GROUPS_DIR,
+  SCHEDULER_POLL_INTERVAL,
+  TIMEZONE,
+} from './config.js';
 import { readEnvFile } from './env.js';
 
 const execFileAsync = promisify(execFile);
@@ -137,8 +142,11 @@ async function runTask(
 
   // Subscription gate — skip scheduled tasks for non-active customer groups.
   // Groups without a customer_profiles row (e.g. operator group) always proceed.
+  // Onboarding tasks (audit + recipe) bypass — they're part of the free trial.
+  const isOnboardingTask = task.schedule_type === 'once' &&
+    (task.id.startsWith('audit-') || task.id.startsWith('recipe-'));
   const profile = getCustomerProfileByFolder(task.group_folder);
-  if (profile && profile.subscription_status !== 'active') {
+  if (profile && profile.subscription_status !== 'active' && !isOnboardingTask) {
     logger.info(
       {
         taskId: task.id,
@@ -162,9 +170,13 @@ async function runTask(
   // ---------------------------------------------------------------------------
   if (task.task_kind === 'kernel_nudge') {
     try {
-      const env = readEnvFile(['SOLOLEDGER_MASTER_KEY', 'SOLOLEDGER_KERNEL_PATH']);
+      const env = readEnvFile([
+        'SOLOLEDGER_MASTER_KEY',
+        'SOLOLEDGER_KERNEL_PATH',
+      ]);
       const kernelDir =
-        env.SOLOLEDGER_KERNEL_PATH || path.resolve(process.cwd(), '..', 'kernel');
+        env.SOLOLEDGER_KERNEL_PATH ||
+        path.resolve(process.cwd(), '..', 'kernel');
       const ledger = path.join(GROUPS_DIR, task.group_folder, 'ledger.db');
       const execEnv: NodeJS.ProcessEnv = {
         ...process.env,
@@ -227,7 +239,11 @@ async function runTask(
       const msg = lines.join('\n');
 
       await deps.sendMessage(task.chat_jid, msg);
-      updateTaskAfterRun(task.id, nextRun, `Nudge sent: ${rows.length} pending`);
+      updateTaskAfterRun(
+        task.id,
+        nextRun,
+        `Nudge sent: ${rows.length} pending`,
+      );
       logTaskRun({
         task_id: task.id,
         run_at: new Date().toISOString(),
@@ -303,6 +319,7 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         ...(task.model && { model: task.model }),
+        ...(task.max_turns && { maxTurns: task.max_turns }),
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

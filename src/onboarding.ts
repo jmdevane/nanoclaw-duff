@@ -29,6 +29,7 @@ import {
   ONBOARDING_PORT,
   PRODUCT_NAME,
   PRODUCT_URL,
+  PYTHON_BIN,
   PUBLIC_URL,
   STRIPE_PAYMENT_LINK,
   TIMEZONE,
@@ -46,10 +47,13 @@ import {
   getRegisteredGroupByFolder,
   getTasksForGroup,
   markSessionUsed,
+  addPlaidItem,
   updateCustomerSubscription,
 } from './db.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
+import { deliverSlackEvent } from './channels/slack.js';
+import { handleSlashCommandDirect } from './slash-commands.js';
 
 const execFileAsync = promisify(execFile);
 const PROVISION_TIMEOUT_MS = 30_000;
@@ -106,6 +110,8 @@ function secrets() {
     'SOLOLEDGER_MASTER_KEY',
     'WAITLIST_MODE',
     'MAX_ACTIVE_CUSTOMERS',
+    'SLACK_SIGNING_SECRET',
+    'SLACK_CLIENT_ID',
   ]);
 }
 
@@ -130,7 +136,7 @@ Steps in order:
    Parse the JSON output.
 
 4. Auto-post all transactions in the "auto" bucket:
-   For each item: python3 /workspace/extra/kernel/categorize.py post {txn_id} {suggested_account} {credit_account}
+   Build a JSON array from the "auto" bucket and batch-post: python3 /workspace/extra/kernel/categorize.py batch-post '<JSON>'
    If the "auto" bucket is empty, skip this step.
 
 5. Anomaly scan — check ALL transactions (both buckets) since LAST_SYNC_DATE for:
@@ -439,7 +445,7 @@ async function runProvision(
       : {}),
   };
 
-  const { stdout } = await execFileAsync('python3', args, {
+  const { stdout } = await execFileAsync(PYTHON_BIN, args, {
     env,
     timeout: PROVISION_TIMEOUT_MS,
   });
@@ -590,7 +596,7 @@ async function handleStripeEvent(
         deps
           .sendMessage(
             profile.channel_identity,
-            `Your SoloLedger subscription is set to end on ${dateStr}. You'll have full access until then. Reply /billing any time to manage your subscription.`,
+            `Your Judy subscription is set to end on ${dateStr}. You'll have full access until then. Reply /billing any time to manage your subscription.`,
           )
           .catch((err) =>
             logger.error(
@@ -654,7 +660,7 @@ async function handleStripeEvent(
 
       await deps.sendMessage(
         profile.channel_identity,
-        `Your SoloLedger subscription has ended. Your books and history are preserved — reply /billing any time to reactivate.`,
+        `Your Judy subscription has ended. Your books and history are preserved — reply /billing any time to reactivate.`,
       );
       break;
     }
@@ -694,7 +700,7 @@ async function handleStripeEvent(
 
       await deps.sendMessage(
         profile.channel_identity,
-        `There's an issue with your SoloLedger payment — the latest charge didn't go through. Please update your payment method to keep your books running. Reply /billing for a link to manage your subscription.`,
+        `There's an issue with your Judy payment — the latest charge didn't go through. Please update your payment method to keep your books running. Reply /billing for a link to manage your subscription.`,
       );
       break;
     }
@@ -717,6 +723,176 @@ export interface OnboardingDeps {
 // ---------------------------------------------------------------------------
 // Telegram /start handler — exported for telegram.ts to call
 // ---------------------------------------------------------------------------
+
+export async function handleSlackActivation(
+  chatJid: string,
+  token: string,
+  deps: OnboardingDeps,
+): Promise<void> {
+  logger.info(
+    { chatJid, tokenPrefix: token.slice(0, 8) },
+    'Slack activation received',
+  );
+
+  if (deps.isRegistered(chatJid)) {
+    logger.warn(
+      { chatJid },
+      'Slack activation on already-registered JID — ignoring',
+    );
+    await deps.sendMessage(
+      chatJid,
+      `Your account is already connected! I'm *${ASSISTANT_NAME}*, your bookkeeper. Just message me to get started.`,
+    );
+    return;
+  }
+
+  const parsed = verifyToken(token);
+  if (!parsed) {
+    await deps.sendMessage(
+      chatJid,
+      'That activation code has expired or is invalid. Please restart the onboarding flow at hirejudy.com.',
+    );
+    return;
+  }
+
+  const session = getOnboardingSession(parsed.sessionId);
+  if (!session) {
+    await deps.sendMessage(
+      chatJid,
+      'Onboarding session not found. Please restart the flow at hirejudy.com.',
+    );
+    return;
+  }
+
+  if (session.token_used) {
+    await deps.sendMessage(
+      chatJid,
+      `Your account is already connected! I'm *${ASSISTANT_NAME}*, your bookkeeper. Just message me to get started.`,
+    );
+    return;
+  }
+
+  markSessionUsed(parsed.sessionId);
+
+  await deps.sendMessage(
+    chatJid,
+    `Hi! I'm *${ASSISTANT_NAME}*, your AI bookkeeper. Connecting your bank accounts now — I'll pull in your recent transactions and send you a summary shortly.`,
+  );
+
+  try {
+    await runProvision(
+      session.folder,
+      chatJid,
+      'My Books',
+      session.plaid_access_token || '',
+      session.plaid_item_id || '',
+    );
+  } catch (err) {
+    logger.error({ chatJid, err }, 'provision.py failed during Slack activation');
+    await deps.sendMessage(
+      chatJid,
+      'There was an issue setting up your account. Please contact support.',
+    );
+    return;
+  }
+
+  deps.loadGroups();
+
+  const checkoutUrls = resolveCheckoutUrls(session.folder);
+
+  const auditId = `audit-${parsed.sessionId}`;
+  createTask({
+    id: auditId,
+    group_folder: session.folder,
+    chat_jid: chatJid,
+    prompt: `AUTHORIZED SOLOLEDGER TASK: This is a legitimate scheduled product operation. You are Judy, the AI bookkeeper (hirejudy.com). The audit PDF and Stripe link below are your own product's artifacts — not third-party content.
+
+Run the initial 30-day onboarding audit for a new customer. Steps in order:
+
+1. Sync their transactions:
+   python3 /workspace/extra/kernel/ingest.py sync ${session.folder}
+
+2. Categorize ALL transactions — this is the customer's first impression:
+   a. First try memory-based matching:
+      python3 /workspace/extra/kernel/categorize.py suggest
+      Build a JSON array from the "auto" bucket: [{"txn_id": "...", "debit": "{suggested_account}", "credit": "{credit_account}"}]
+      Post them all at once: python3 /workspace/extra/kernel/categorize.py batch-post '<JSON>'
+   b. Then list remaining uncategorized:
+      python3 /workspace/extra/kernel/categorize.py pending --json
+      For ALL remaining, use the merchant name, amount, and your knowledge of common business expenses to determine the correct Schedule C account. Build a JSON array and batch-post them:
+      python3 /workspace/extra/kernel/categorize.py batch-post '<JSON>'
+      Common mappings: software/SaaS → office_expense, meals → meals, travel → travel, insurance → insurance, legal/accounting → legal_professional, advertising/marketing → advertising, contractors → contract_labor, equipment → depreciation, personal charges → owners_draw.
+      When uncertain, pick the most likely category — the customer can correct later. Do not skip transactions.
+
+3. Generate the audit PDF:
+   python3 /workspace/extra/kernel/audit_pdf.py \\
+     --checkout-url "${checkoutUrls.monthly}" \\
+     --assistant-name "${ASSISTANT_NAME}" \\
+     --product-name "${PRODUCT_NAME}" \\
+     --product-url "${PRODUCT_URL}"
+   Read line 1 (PDF path) and line 2 (TEASER: ...) from stdout.
+
+4. Send a brief text message via mcp__nanoclaw__send_message:
+   "Here's your 30-day financial audit. [use the teaser text from step 3] Reply any time to start reviewing transactions or ask me anything about your finances."
+
+5. Immediately send the PDF via mcp__nanoclaw__send_file:
+   file_path=<path from step 3>, caption="Your 30-Day Financial Audit"
+
+Do not send any additional messages.`,
+    schedule_type: 'once',
+    schedule_value: new Date(Date.now() + 20_000).toISOString(),
+    context_mode: 'isolated',
+    next_run: new Date(Date.now() + 20_000).toISOString(),
+    status: 'active',
+    max_turns: 200,
+    created_at: new Date().toISOString(),
+  });
+
+  if (checkoutUrls.monthly) {
+    const checkoutJid = chatJid;
+    const checkoutMsg = `Ready to make it official? [Start your subscription here](${checkoutUrls.monthly})`;
+    setTimeout(
+      () => {
+        deps
+          .sendMessage(checkoutJid, checkoutMsg)
+          .catch((err) =>
+            logger.error(
+              { chatJid: checkoutJid, err },
+              'Failed to send checkout URL (Slack)',
+            ),
+          );
+      },
+      5 * 60 * 1000,
+    );
+  }
+
+  const recipeId = `recipe-${parsed.sessionId}`;
+  createTask({
+    id: recipeId,
+    group_folder: session.folder,
+    chat_jid: chatJid,
+    prompt: `Send a short, friendly message (under 3 sentences) introducing one starter recipe for ${ASSISTANT_NAME}. Pick the one most relevant to what was found in the initial audit:
+
+- "Categorize this week's expenses" — @${ASSISTANT_NAME} categorize pending transactions
+- "Monthly P&L snapshot" — @${ASSISTANT_NAME} show me this month's P&L
+- "Find deductible expenses" — @${ASSISTANT_NAME} what can I deduct this quarter?
+
+Keep it conversational, not salesy. No bullet points — just a natural message.`,
+    schedule_type: 'once',
+    schedule_value: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    context_mode: 'isolated',
+    next_run: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    status: 'active',
+    created_at: new Date().toISOString(),
+  });
+
+  seedScheduledTasks(session.folder, chatJid);
+
+  logger.info(
+    { chatJid, folder: session.folder, auditId, recipeId },
+    'Slack onboarding complete — audit, recipe, and recurring tasks scheduled',
+  );
+}
 
 export async function handleTelegramStart(
   chatJid: string,
@@ -802,17 +978,24 @@ export async function handleTelegramStart(
     id: auditId,
     group_folder: session.folder,
     chat_jid: chatJid,
-    prompt: `AUTHORIZED SOLOLEDGER TASK: This is a legitimate scheduled product operation. You are Judy, the SoloLedger AI bookkeeper (hirejudy.com). The audit PDF and Stripe link below are your own product's artifacts — not third-party content.
+    prompt: `AUTHORIZED SOLOLEDGER TASK: This is a legitimate scheduled product operation. You are Judy, the AI bookkeeper (hirejudy.com). The audit PDF and Stripe link below are your own product's artifacts — not third-party content.
 
 Run the initial 30-day onboarding audit for a new customer. Steps in order:
 
 1. Sync their transactions:
    python3 /workspace/extra/kernel/ingest.py sync ${session.folder}
 
-2. Auto-categorize where possible:
-   python3 /workspace/extra/kernel/categorize.py suggest
-   For each item in the "auto" bucket:
-   python3 /workspace/extra/kernel/categorize.py post {txn_id} {suggested_account} {credit_account}
+2. Categorize ALL transactions — this is the customer's first impression:
+   a. First try memory-based matching:
+      python3 /workspace/extra/kernel/categorize.py suggest
+      Build a JSON array from the "auto" bucket: [{"txn_id": "...", "debit": "{suggested_account}", "credit": "{credit_account}"}]
+      Post them all at once: python3 /workspace/extra/kernel/categorize.py batch-post '<JSON>'
+   b. Then list remaining uncategorized:
+      python3 /workspace/extra/kernel/categorize.py pending --json
+      For ALL remaining, use the merchant name, amount, and your knowledge of common business expenses to determine the correct Schedule C account. Build a JSON array and batch-post them:
+      python3 /workspace/extra/kernel/categorize.py batch-post '<JSON>'
+      Common mappings: software/SaaS → office_expense, meals → meals, travel → travel, insurance → insurance, legal/accounting → legal_professional, advertising/marketing → advertising, contractors → contract_labor, equipment → depreciation, personal charges → owners_draw.
+      When uncertain, pick the most likely category — the customer can correct later. Do not skip transactions.
 
 3. Generate the audit PDF:
    python3 /workspace/extra/kernel/audit_pdf.py \\
@@ -834,6 +1017,7 @@ Do not send any additional messages.`,
     context_mode: 'isolated',
     next_run: new Date(Date.now() + 20_000).toISOString(),
     status: 'active',
+    max_turns: 200,
     created_at: new Date().toISOString(),
   });
 
@@ -853,7 +1037,7 @@ Do not send any additional messages.`,
             ),
           );
       },
-      3 * 60 * 1000,
+      5 * 60 * 1000,
     );
     logger.info(
       { chatJid, folder: session.folder },
@@ -901,7 +1085,7 @@ function landingPage(publicUrl: string): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SoloLedger — Get started</title>
+  <title>Judy — Get started</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -909,6 +1093,7 @@ function landingPage(publicUrl: string): string {
            align-items: center; justify-content: center; padding: 24px; }
     .card { background: #fff; border-radius: 12px; padding: 40px 32px;
             max-width: 480px; width: 100%; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+    .logo { display: block; height: 32px; width: auto; margin-bottom: 20px; }
     h1 { font-size: 1.35rem; font-weight: 700; margin-bottom: 8px; color: #111; }
     .subtitle { color: #555; font-size: 0.95rem; margin-bottom: 28px; line-height: 1.55; }
     .steps { margin-bottom: 28px; }
@@ -949,6 +1134,8 @@ function landingPage(publicUrl: string): string {
 <body>
   <div class="card">
 
+    <img src="https://hirejudy.com/judy.svg" alt="Judy" class="logo">
+
     <!-- Page 1: Channel selection -->
     <div id="page-channel" class="page active">
       <h1>Where would you like to receive your bookkeeping updates?</h1>
@@ -963,13 +1150,12 @@ function landingPage(publicUrl: string): string {
           </svg>
           Telegram
         </button>
-        <button class="channel-btn" style="cursor:default;opacity:0.5" disabled>
+        <button class="channel-btn" onclick="selectChannel('slack')">
           <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
             <rect width="48" height="48" rx="10" fill="#4A154B"/>
-            <path d="M14 24C14 18.477 18.477 14 24 14C29.523 14 34 18.477 34 24C34 29.523 29.523 34 24 34C18.477 34 14 29.523 14 24Z" fill="#4A154B"/>
-            <text x="24" y="29" text-anchor="middle" font-size="14" fill="white" font-family="sans-serif" font-weight="700">#</text>
+            <text x="24" y="30" text-anchor="middle" font-size="18" fill="white" font-family="sans-serif" font-weight="700">#</text>
           </svg>
-          Slack <span class="coming-soon">coming soon</span>
+          Slack
         </button>
       </div>
     </div>
@@ -977,7 +1163,7 @@ function landingPage(publicUrl: string): string {
     <!-- Page 2: Plaid connection -->
     <div id="page-plaid" class="page">
       <h1>Connect your business bank and credit card accounts</h1>
-      <p class="subtitle">SoloLedger needs read-only access to pull your transactions. We use Plaid — the same bank-linking infrastructure trusted by thousands of financial apps.</p>
+      <p class="subtitle">Judy needs read-only access to pull your transactions. We use Plaid — the same bank-linking infrastructure trusted by thousands of financial apps.</p>
       <div class="steps">
         <div class="step">
           <div class="step-num">1</div>
@@ -985,7 +1171,7 @@ function landingPage(publicUrl: string): string {
         </div>
         <div class="step">
           <div class="step-num">2</div>
-          <div class="step-text">You'll get a private link — tap it on your phone to meet your AI bookkeeper on Telegram.</div>
+          <div id="step2-text" class="step-text">You'll get a private link — tap it on your phone to meet your AI bookkeeper on Telegram.</div>
         </div>
         <div class="step">
           <div class="step-num">3</div>
@@ -1007,6 +1193,13 @@ function landingPage(publicUrl: string): string {
       selectedChannel = channel;
       document.querySelectorAll('.channel-btn').forEach(b => b.classList.remove('selected'));
       event.currentTarget.classList.add('selected');
+      if (channel === 'slack') {
+        document.getElementById('step2-text').textContent =
+          'You\\'ll get an activation code — DM it to @Judy in Slack to start your bookkeeper.';
+      } else {
+        document.getElementById('step2-text').textContent =
+          'You\\'ll get a private link — tap it on your phone to meet your AI bookkeeper on Telegram.';
+      }
       setTimeout(() => {
         document.getElementById('page-channel').classList.remove('active');
         document.getElementById('page-plaid').classList.add('active');
@@ -1042,13 +1235,29 @@ function landingPage(publicUrl: string): string {
             const ex = await fetch('/plaid/exchange', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ public_token, userId, institution: metadata.institution.name }),
+              body: JSON.stringify({ public_token, userId, institution: metadata.institution.name, channel: selectedChannel }),
             });
             const result = await ex.json();
-            if (result.error) {
+            if (result.waitlisted) {
+              log.innerHTML =
+                '<strong>You\\'re on the waitlist!</strong>' +
+                '<p style="margin-top:12px;color:#374151">' + (result.message || 'We\\'ll reach out as soon as a spot opens up.') + '</p>' +
+                '<p class="hint" style="margin-top:8px">Your bank connection is saved — you won\\'t need to reconnect when your spot opens.</p>';
+            } else if (result.error) {
               log.textContent = 'Error: ' + result.error;
               btn.disabled = false;
               btn.textContent = 'Try again';
+            } else if (result.slackCode) {
+              var slackSteps = '<strong>' + metadata.institution.name + ' connected!</strong>';
+              if (result.slackInstallUrl) {
+                slackSteps += '<p style="margin-top:12px"><strong>Step 1:</strong> <a href="' + result.slackInstallUrl + '" target="_blank" style="color:#1a73e8;font-weight:600">Add Judy to your Slack workspace →</a></p>';
+                slackSteps += '<p style="margin-top:8px"><strong>Step 2:</strong> Open a DM with Judy and send this activation code:</p>';
+              } else {
+                slackSteps += '<p style="margin-top:8px">DM this activation code to <strong>Judy</strong> in Slack:</p>';
+              }
+              slackSteps += '<div class="link-box" style="font-family:monospace;font-size:1rem;word-break:break-all;user-select:all">activate ' + result.slackCode + '</div>';
+              slackSteps += '<p class="hint">This code expires in 15 minutes and can only be used once. Paste as plain text — don\\'t use code formatting.</p>';
+              log.innerHTML = slackSteps;
             } else {
               log.innerHTML =
                 '<strong>' + metadata.institution.name + ' connected!</strong>' +
@@ -1384,6 +1593,163 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
     },
   );
 
+  // Slack webhook — raw body MUST be registered BEFORE express.json() middleware.
+  // Handles URL verification challenge (required for Slack app setup) and
+  // will route events to the Slack channel once fully wired.
+  app.post(
+    '/webhooks/slack',
+    express.raw({ type: 'application/json' }),
+    (req: Request, res: Response) => {
+      const s = secrets();
+      const signingSecret = (s as Record<string, string | undefined>).SLACK_SIGNING_SECRET;
+      const rawBody = req.body as Buffer;
+
+      // Signature verification (skip if secret not yet configured)
+      if (signingSecret) {
+        const timestamp = req.headers['x-slack-request-timestamp'] as string | undefined;
+        const signature = req.headers['x-slack-signature'] as string | undefined;
+
+        if (!timestamp || !signature) {
+          logger.warn('Slack webhook: missing timestamp or signature headers');
+          res.status(400).send('Missing Slack signature headers');
+          return;
+        }
+
+        // Replay attack guard: reject requests older than 5 minutes
+        const tsNum = parseInt(timestamp, 10);
+        if (Math.abs(Date.now() / 1000 - tsNum) > 300) {
+          logger.warn('Slack webhook: timestamp too old, possible replay attack');
+          res.status(400).send('Request too old');
+          return;
+        }
+
+        const baseString = `v0:${timestamp}:${rawBody.toString('utf8')}`;
+        const hmac = crypto
+          .createHmac('sha256', signingSecret)
+          .update(baseString)
+          .digest('hex');
+        const computed = `v0=${hmac}`;
+
+        let valid = false;
+        try {
+          valid = crypto.timingSafeEqual(
+            Buffer.from(computed),
+            Buffer.from(signature),
+          );
+        } catch {
+          valid = false;
+        }
+
+        if (!valid) {
+          logger.warn('Slack webhook: signature verification failed');
+          res.status(400).send('Invalid signature');
+          return;
+        }
+      } else {
+        logger.warn('Slack webhook: SLACK_SIGNING_SECRET not set — skipping signature check');
+      }
+
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>;
+      } catch {
+        res.status(400).send('Invalid JSON');
+        return;
+      }
+
+      // URL verification challenge — required when registering the webhook in Slack app config
+      if (body.type === 'url_verification') {
+        logger.info('Slack webhook: responding to URL verification challenge');
+        res.json({ challenge: body.challenge });
+        return;
+      }
+
+      // Acknowledge immediately — Slack retries on non-2xx or timeout
+      res.json({ ok: true });
+
+      // Route event to Slack channel pipeline
+      if (body.type === 'event_callback') {
+        deliverSlackEvent(body);
+      }
+    },
+  );
+
+  // Slack slash commands — URL-encoded body, MUST be before express.json().
+  // Registered commands in Slack app config POST here instead of going through Events API.
+  app.post(
+    '/webhooks/slack-command',
+    express.raw({ type: 'application/x-www-form-urlencoded' }),
+    async (req: Request, res: Response) => {
+      const s = secrets();
+      const signingSecret = (s as Record<string, string | undefined>).SLACK_SIGNING_SECRET;
+      const rawBody = req.body as Buffer;
+
+      // Signature verification
+      if (signingSecret) {
+        const timestamp = req.headers['x-slack-request-timestamp'] as string | undefined;
+        const signature = req.headers['x-slack-signature'] as string | undefined;
+        if (!timestamp || !signature) {
+          res.status(400).send('Missing Slack signature headers');
+          return;
+        }
+        if (Math.abs(Date.now() / 1000 - parseInt(timestamp, 10)) > 300) {
+          res.status(400).send('Request too old');
+          return;
+        }
+        const baseString = `v0:${timestamp}:${rawBody.toString('utf8')}`;
+        const hmac = crypto.createHmac('sha256', signingSecret).update(baseString).digest('hex');
+        const computed = `v0=${hmac}`;
+        let valid = false;
+        try {
+          valid = crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signature));
+        } catch { valid = false; }
+        if (!valid) {
+          res.status(400).send('Invalid signature');
+          return;
+        }
+      }
+
+      // Parse URL-encoded body
+      const params = new URLSearchParams(rawBody.toString('utf8'));
+      const command = params.get('command') || '';   // e.g. "/help"
+      const text = params.get('text') || '';          // e.g. "p&l" for "/report p&l"
+      const channelId = params.get('channel_id') || '';
+      const responseUrl = params.get('response_url') || '';
+
+      if (!channelId) {
+        res.status(400).json({ text: 'Missing channel_id' });
+        return;
+      }
+
+      const jid = `slack_${channelId}`;
+      const cmd = command.toLowerCase();
+      const subArg = text.trim() || undefined;
+
+      // Look up group by JID (Record key = JID)
+      const group = getAllRegisteredGroups()[jid];
+      if (!group) {
+        // Respond ephemerally — only the user sees this
+        res.json({ response_type: 'ephemeral', text: 'This channel is not registered with Judy.' });
+        return;
+      }
+
+      logger.info({ group: group.name, cmd, subArg, channelId }, 'Slack slash command received');
+
+      try {
+        const result = await handleSlashCommandDirect(cmd, subArg, group, jid);
+        if (result) {
+          // For long results (reports, account lists), use in_channel so it's visible
+          res.json({ response_type: 'in_channel', text: result });
+        } else {
+          res.json({ response_type: 'ephemeral', text: `Unknown command: ${command}` });
+        }
+      } catch (err) {
+        logger.error({ err, cmd, group: group.name }, 'Slack slash command error');
+        res.json({ response_type: 'ephemeral', text: 'Something went wrong. Try again.' });
+      }
+    },
+  );
+
   app.use(express.json());
 
   // Landing page
@@ -1403,7 +1769,7 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
       const plaid = makePlaidClient();
       const response = await plaid.linkTokenCreate({
         user: { client_user_id: userId },
-        client_name: 'SoloLedger',
+        client_name: 'Judy',
         products: ['transactions'] as Parameters<
           PlaidApi['linkTokenCreate']
         >[0]['products'],
@@ -1421,10 +1787,11 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
 
   // Exchange public token → create session → return Telegram deep link
   app.post('/plaid/exchange', async (req: Request, res: Response) => {
-    const { public_token, userId, institution } = req.body as {
+    const { public_token, userId, institution, channel } = req.body as {
       public_token?: string;
       userId?: string;
       institution?: string;
+      channel?: string;
     };
     if (!public_token || !userId) {
       res.status(400).json({ error: 'public_token and userId required' });
@@ -1469,7 +1836,8 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
 
       // Generate session (8-hex session ID → 36-char total token)
       const sessionId = crypto.randomBytes(4).toString('hex');
-      const folder = `telegram_cus_${sessionId}`;
+      const selectedChannel = channel === 'slack' ? 'slack' : 'telegram';
+      const folder = `${selectedChannel}_cus_${sessionId}`;
       const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
       const token = signToken(sessionId, expiresAt);
 
@@ -1499,20 +1867,299 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
         );
       }
 
+      // Register in plaid_items table for multi-item webhook routing
+      addPlaidItem(itemId, folder, institution);
+
       const s = secrets();
-      const botUsername = s.BOT_USERNAME || '';
-      const telegramLink = botUsername
-        ? telegramDeepLink(botUsername, token)
-        : `[Set BOT_USERNAME in .env — token: ${token}]`;
 
-      logger.info(
-        { sessionId, folder, institution, hasBot: !!botUsername },
-        'Onboarding session created',
-      );
+      let responsePayload: Record<string, string>;
+      if (selectedChannel === 'slack') {
+        const slackClientId = (s as Record<string, string | undefined>).SLACK_CLIENT_ID || '';
+        const slackInstallUrl = slackClientId
+          ? `https://slack.com/oauth/v2/authorize?client_id=${slackClientId}&scope=chat:write,im:history,im:read,im:write&user_scope=`
+          : '';
+        responsePayload = { slackCode: token, slackInstallUrl, folder, sessionId };
+        logger.info(
+          { sessionId, folder, institution, channel: 'slack' },
+          'Onboarding session created',
+        );
+      } else {
+        const botUsername = s.BOT_USERNAME || '';
+        const telegramLink = botUsername
+          ? telegramDeepLink(botUsername, token)
+          : `[Set BOT_USERNAME in .env — token: ${token}]`;
+        responsePayload = { telegramLink, folder, sessionId };
+        logger.info(
+          { sessionId, folder, institution, hasBot: !!botUsername },
+          'Onboarding session created',
+        );
+      }
 
-      res.json({ telegramLink, folder, sessionId });
+      res.json(responsePayload);
     } catch (err) {
       logger.error({ err }, 'Plaid exchange failed');
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // ── /add-account — connect additional Plaid institution ─────────────────
+
+  function verifyAddAccountToken(token: string): { folder: string } | null {
+    const s = secrets();
+    const secret = s.ONBOARDING_SECRET;
+    if (!secret) return null;
+
+    const lastDash = token.lastIndexOf('-');
+    const secondLastDash = token.lastIndexOf('-', lastDash - 1);
+    if (lastDash === -1 || secondLastDash === -1) return null;
+
+    const folder = token.slice(0, secondLastDash);
+    const expiryStr = token.slice(secondLastDash + 1, lastDash);
+    const hmac = token.slice(lastDash + 1);
+
+    if (!folder || !expiryStr || hmac.length !== 16) return null;
+
+    const payload = `${folder}-${expiryStr}`;
+    const expectedHmac = crypto
+      .createHmac('sha256', secret)
+      .update(payload)
+      .digest('hex')
+      .slice(0, 16);
+
+    try {
+      if (!crypto.timingSafeEqual(Buffer.from(hmac, 'hex'), Buffer.from(expectedHmac, 'hex'))) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+
+    const expiresAt = new Date(parseInt(expiryStr, 10) * 1000);
+    if (expiresAt < new Date()) return null;
+
+    return { folder };
+  }
+
+  app.get('/add-account', (req: Request, res: Response) => {
+    const token = req.query.token as string | undefined;
+    if (!token) {
+      res.status(400).send('Missing token');
+      return;
+    }
+    logger.info({ token, tokenLength: token.length }, '/add-account token received');
+    const parsed = verifyAddAccountToken(token);
+    if (!parsed) {
+      logger.warn({ token }, '/add-account token verification failed');
+      res.status(403).send('Invalid or expired link. Send /addaccount again to get a new one.');
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/html');
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Judy — Add Account</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+           background: #f9fafb; min-height: 100vh; display: flex;
+           align-items: center; justify-content: center; padding: 24px; }
+    .card { background: #fff; border-radius: 12px; padding: 40px 32px;
+            max-width: 480px; width: 100%; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+    h1 { font-size: 1.35rem; font-weight: 700; margin-bottom: 8px; color: #111; }
+    .subtitle { color: #555; font-size: 0.95rem; margin-bottom: 28px; line-height: 1.55; }
+    .btn { display: block; width: 100%; padding: 14px; border: none; border-radius: 8px;
+           font-size: 1rem; font-weight: 600; cursor: pointer; }
+    .logo { display: block; height: 32px; width: auto; margin-bottom: 20px; }
+    .btn-primary { background: #111; color: #fff; }
+    .btn-primary:hover { background: #333; }
+    .btn-primary:disabled { background: #999; cursor: not-allowed; }
+    .success { text-align: center; }
+    .success h1 { color: #16a34a; }
+    .error { color: #dc2626; margin-top: 12px; font-size: 0.9rem; }
+    .hidden { display: none; }
+  </style>
+  <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+</head>
+<body>
+  <div class="card" id="main-card">
+    <img src="https://hirejudy.com/judy.svg" alt="Judy" class="logo">
+    <h1>Connect another account</h1>
+    <p class="subtitle">Add a bank account or credit card. Judy will start pulling transactions automatically.</p>
+    <button class="btn btn-primary" id="link-btn">Connect via Plaid</button>
+    <div id="error" class="error hidden"></div>
+  </div>
+  <div class="card success hidden" id="success-card">
+    <h1>Account connected!</h1>
+    <p class="subtitle">New transactions will appear in your next sync. Send /sync to pull them now.</p>
+  </div>
+  <script>
+    const token = ${JSON.stringify(token)};
+    const folder = ${JSON.stringify(parsed.folder)};
+    const btn = document.getElementById('link-btn');
+    const errEl = document.getElementById('error');
+
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Loading...';
+      errEl.classList.add('hidden');
+
+      try {
+        const ltRes = await fetch('/plaid/link-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: folder }),
+        });
+        const ltData = await ltRes.json();
+        if (!ltData.link_token) throw new Error('Failed to create link token');
+
+        const handler = Plaid.create({
+          token: ltData.link_token,
+          onSuccess: async (publicToken, metadata) => {
+            btn.textContent = 'Linking...';
+            try {
+              const xRes = await fetch('/plaid/exchange-additional', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  public_token: publicToken,
+                  folder: folder,
+                  token: token,
+                  institution: metadata.institution ? metadata.institution.name : '',
+                }),
+              });
+              const xData = await xRes.json();
+              if (xData.error) throw new Error(xData.error);
+              document.getElementById('main-card').classList.add('hidden');
+              document.getElementById('success-card').classList.remove('hidden');
+            } catch (e) {
+              errEl.textContent = e.message || 'Exchange failed';
+              errEl.classList.remove('hidden');
+              btn.disabled = false;
+              btn.textContent = 'Connect via Plaid';
+            }
+          },
+          onExit: () => {
+            btn.disabled = false;
+            btn.textContent = 'Connect via Plaid';
+          },
+        });
+        handler.open();
+      } catch (e) {
+        errEl.textContent = e.message || 'Failed to initialize';
+        errEl.classList.remove('hidden');
+        btn.disabled = false;
+        btn.textContent = 'Connect via Plaid';
+      }
+    });
+  </script>
+</body>
+</html>`);
+  });
+
+  app.post('/plaid/exchange-additional', async (req: Request, res: Response) => {
+    const { public_token, folder, token, institution } = req.body as {
+      public_token?: string;
+      folder?: string;
+      token?: string;
+      institution?: string;
+    };
+
+    if (!public_token || !folder || !token) {
+      res.status(400).json({ error: 'Missing required fields' });
+      return;
+    }
+
+    // Verify HMAC token
+    const parsed = verifyAddAccountToken(token);
+    if (!parsed || parsed.folder !== folder) {
+      res.status(403).json({ error: 'Invalid or expired token' });
+      return;
+    }
+
+    // Verify group exists
+    const group = getRegisteredGroupByFolder(folder);
+    if (!group) {
+      res.status(404).json({ error: 'Group not found' });
+      return;
+    }
+
+    try {
+      const plaid = makePlaidClient();
+      const exchange = await plaid.itemPublicTokenExchange({ public_token });
+      const accessToken = exchange.data.access_token;
+      const itemId = exchange.data.item_id;
+
+      // Store token in vault as plaid_token_{item_id}
+      const s2 = secrets();
+      const kernelPath = readEnvFile(['SOLOLEDGER_KERNEL_PATH']).SOLOLEDGER_KERNEL_PATH;
+      if (kernelPath && s2.SOLOLEDGER_MASTER_KEY) {
+        try {
+          await execFileAsync(PYTHON_BIN, [
+            '-c',
+            `import sys, os; sys.path.insert(0, os.environ['KERNEL_PATH']); import secrets; secrets.set_secret(os.environ['FOLDER'], 'plaid_token_' + os.environ['ITEM_ID'], os.environ['TOKEN'])`,
+          ], {
+            env: {
+              ...process.env,
+              SOLOLEDGER_MASTER_KEY: s2.SOLOLEDGER_MASTER_KEY,
+              KERNEL_PATH: kernelPath,
+              FOLDER: folder,
+              ITEM_ID: itemId,
+              TOKEN: accessToken,
+            },
+            timeout: 5000,
+          });
+          logger.info({ folder, itemId }, 'Plaid token stored in vault');
+        } catch (err) {
+          logger.error({ err, folder, itemId }, 'Failed to store Plaid token in vault');
+        }
+      }
+
+      // Insert plaid_items row
+      addPlaidItem(itemId, folder, institution || undefined);
+
+      // Register webhook
+      const webhookUrl = `${PUBLIC_URL}/webhooks/plaid`;
+      try {
+        await plaid.itemWebhookUpdate({
+          access_token: accessToken,
+          webhook: webhookUrl,
+        });
+      } catch (err) {
+        logger.warn({ err, webhookUrl, itemId }, 'Failed to register Plaid webhook for additional account');
+      }
+
+      // Auto-link accounts
+      if (kernelPath) {
+        try {
+          const linkArgs = ['link-accounts', folder, '--institution', institution || ''];
+          await execFileAsync(PYTHON_BIN, [
+            `${kernelPath}/ingest.py`, ...linkArgs,
+          ], {
+            env: {
+              ...process.env,
+              PLAID_ACCESS_TOKEN: accessToken,
+              PLAID_CLIENT_ID: s2.PLAID_CLIENT_ID || '',
+              PLAID_API_KEY_PROD: s2.PLAID_API_KEY_PROD || '',
+              PLAID_API_KEY_TEST: s2.PLAID_API_KEY_TEST || '',
+            },
+            timeout: 15000,
+          });
+        } catch (err) {
+          logger.warn({ err, folder }, 'Auto-link accounts failed — will be linked on next sync');
+        }
+      }
+
+      logger.info(
+        { folder, itemId, institution },
+        'Additional Plaid account connected',
+      );
+
+      res.json({ ok: true, itemId, institution });
+    } catch (err) {
+      logger.error({ err, folder }, 'Plaid exchange-additional failed');
       res.status(500).json({ error: String(err) });
     }
   });

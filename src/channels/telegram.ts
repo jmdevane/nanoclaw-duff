@@ -405,10 +405,18 @@ export class TelegramChannel implements Channel {
     const captionOpts = caption ? { caption } : {};
     try {
       if (isImage) {
-        await this.bot.api.sendPhoto(numericId, new InputFile(filePath), captionOpts);
+        await this.bot.api.sendPhoto(
+          numericId,
+          new InputFile(filePath),
+          captionOpts,
+        );
         logger.info({ jid, filePath }, 'Telegram photo sent');
       } else {
-        await this.bot.api.sendDocument(numericId, new InputFile(filePath), captionOpts);
+        await this.bot.api.sendDocument(
+          numericId,
+          new InputFile(filePath),
+          captionOpts,
+        );
         logger.info({ jid, filePath }, 'Telegram document sent');
       }
     } catch (err) {

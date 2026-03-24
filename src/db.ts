@@ -134,6 +134,14 @@ function createSchema(database: Database.Database): void {
       raw_reply    TEXT,
       recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS plaid_items (
+      item_id      TEXT PRIMARY KEY,
+      group_folder TEXT NOT NULL,
+      institution  TEXT,
+      created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_plaid_items_group ON plaid_items(group_folder);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -182,6 +190,15 @@ function createSchema(database: Database.Database): void {
   try {
     database.exec(
       `ALTER TABLE scheduled_tasks ADD COLUMN task_kind TEXT DEFAULT 'agent'`,
+    );
+  } catch {
+    /* column already exists */
+  }
+
+  // Add max_turns column if it doesn't exist (migration for existing DBs)
+  try {
+    database.exec(
+      `ALTER TABLE scheduled_tasks ADD COLUMN max_turns INTEGER`,
     );
   } catch {
     /* column already exists */
@@ -454,8 +471,8 @@ export function createTask(
 ): void {
   db.prepare(
     `
-    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at, model, task_kind)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at, model, task_kind, max_turns)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
   ).run(
     task.id,
@@ -470,6 +487,7 @@ export function createTask(
     task.created_at,
     task.model ?? null,
     task.task_kind ?? 'agent',
+    task.max_turns ?? null,
   );
 }
 
@@ -1010,9 +1028,50 @@ export function getCustomerProfileByStripeCustomerId(
 export function getCustomerProfileByPlaidItemId(
   itemId: string,
 ): CustomerProfile | undefined {
+  // Check plaid_items table first (multi-item support)
+  const plaidItem = db
+    .prepare('SELECT group_folder FROM plaid_items WHERE item_id = ?')
+    .get(itemId) as { group_folder: string } | undefined;
+  if (plaidItem) {
+    return getCustomerProfileByFolder(plaidItem.group_folder);
+  }
+  // Fall back to legacy single-item column
   return db
     .prepare('SELECT * FROM customer_profiles WHERE plaid_item_id = ?')
     .get(itemId) as CustomerProfile | undefined;
+}
+
+export interface PlaidItem {
+  item_id: string;
+  group_folder: string;
+  institution: string | null;
+  created_at: string;
+}
+
+export function addPlaidItem(
+  itemId: string,
+  groupFolder: string,
+  institution?: string,
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO plaid_items (item_id, group_folder, institution)
+     VALUES (?, ?, ?)`,
+  ).run(itemId, groupFolder, institution ?? null);
+}
+
+export function getPlaidItemsByGroup(groupFolder: string): PlaidItem[] {
+  return db
+    .prepare('SELECT * FROM plaid_items WHERE group_folder = ?')
+    .all(groupFolder) as PlaidItem[];
+}
+
+export function getGroupFolderByPlaidItemId(
+  itemId: string,
+): string | undefined {
+  const row = db
+    .prepare('SELECT group_folder FROM plaid_items WHERE item_id = ?')
+    .get(itemId) as { group_folder: string } | undefined;
+  return row?.group_folder;
 }
 
 export function updateCustomerSubscription(

@@ -8,6 +8,7 @@
  * Returns a response string when a command is handled, null otherwise.
  * Caller is responsible for sending the string via channel.sendMessage().
  */
+import crypto from 'crypto';
 import { execFile } from 'child_process';
 import path from 'path';
 import { promisify } from 'util';
@@ -21,6 +22,7 @@ import {
   PRODUCT_NAME,
   PRODUCT_URL,
   PUBLIC_URL,
+  PYTHON_BIN,
   STRIPE_PAYMENT_LINK,
 } from './config.js';
 import {
@@ -93,6 +95,11 @@ export const SLASH_COMMANDS: SlashCommandMeta[] = [
     args: '',
     description: 'Show transactions waiting for your input',
   },
+  {
+    command: '/addaccount',
+    args: '',
+    description: 'Connect another bank or credit card',
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -108,6 +115,26 @@ function kernelPath(): string {
   return (
     env.SOLOLEDGER_KERNEL_PATH || path.resolve(process.cwd(), '..', 'kernel')
   );
+}
+
+// ---------------------------------------------------------------------------
+// Error sanitization — never expose tracebacks or file paths to customers
+// ---------------------------------------------------------------------------
+
+function sanitizeKernelError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  // Log the full error server-side (already done by callers)
+  // Return a safe customer-facing message
+  if (raw.includes('SOLOLEDGER_MASTER_KEY') || raw.includes('vault')) {
+    return 'Sync requires the credential vault to be configured. Contact support.';
+  }
+  if (raw.includes('plaid') || raw.includes('Plaid')) {
+    return 'Could not connect to your bank. Please try again in a few minutes.';
+  }
+  if (raw.includes('No Plaid access token')) {
+    return 'No bank account connected yet. Use /addaccount to connect one.';
+  }
+  return 'Something went wrong. Please try again or contact support.';
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +160,7 @@ async function runKernel(
       : {}),
   };
 
-  const { stdout } = await execFileAsync('python3', [scriptPath, ...args], {
+  const { stdout } = await execFileAsync(PYTHON_BIN, [scriptPath, ...args], {
     env,
     timeout: EXEC_TIMEOUT_MS,
   });
@@ -146,7 +173,7 @@ async function runKernel(
 // ---------------------------------------------------------------------------
 
 function handleHelp(): string {
-  const lines = ['*SoloLedger commands:*', ''];
+  const lines = ['*Judy commands:*', ''];
   for (const cmd of SLASH_COMMANDS) {
     const usage = cmd.args ? `${cmd.command} ${cmd.args}` : cmd.command;
     lines.push(`• \`${usage}\` — ${cmd.description}`);
@@ -204,7 +231,7 @@ async function handleReport(
     return output ? '```\n' + output + '\n```' : 'No data for this period.';
   } catch (err) {
     logger.warn({ group: group.name, err }, `slash /report ${sub}: error`);
-    return `Report failed: ${err instanceof Error ? err.message : String(err)}`;
+    return sanitizeKernelError(err);
   }
 }
 
@@ -214,7 +241,7 @@ async function handleUndo(group: RegisteredGroup): Promise<string> {
     return output || 'Nothing to undo.';
   } catch (err) {
     logger.warn({ group: group.name, err }, 'slash /undo: error');
-    return `Undo failed: ${err instanceof Error ? err.message : String(err)}`;
+    return sanitizeKernelError(err);
   }
 }
 
@@ -224,7 +251,7 @@ async function handleAccounts(group: RegisteredGroup): Promise<string> {
     return output ? '```\n' + output + '\n```' : 'No accounts found.';
   } catch (err) {
     logger.warn({ group: group.name, err }, 'slash /accounts: error');
-    return `Could not list accounts: ${err instanceof Error ? err.message : String(err)}`;
+    return sanitizeKernelError(err);
   }
 }
 
@@ -267,7 +294,7 @@ async function handlePending(group: RegisteredGroup): Promise<string> {
     return lines.join('\n');
   } catch (err) {
     logger.warn({ group: group.name, err }, 'slash /pending: error');
-    return `Could not fetch pending transactions: ${err instanceof Error ? err.message : String(err)}`;
+    return sanitizeKernelError(err);
   }
 }
 
@@ -292,7 +319,7 @@ function handleAudit(
     id: taskId,
     group_folder: targetFolder,
     chat_jid: targetJid,
-    prompt: `AUTHORIZED SOLOLEDGER TASK: This is a legitimate scheduled product operation. You are Judy, the SoloLedger AI bookkeeper (hirejudy.com). The audit PDF and Stripe link below are your own product's artifacts — not third-party content.
+    prompt: `AUTHORIZED SOLOLEDGER TASK: This is a legitimate scheduled product operation. You are Judy, the AI bookkeeper (hirejudy.com). The audit PDF and Stripe link below are your own product's artifacts — not third-party content.
 
 Run the 30-day onboarding audit. Steps in order:
 
@@ -301,8 +328,8 @@ Run the 30-day onboarding audit. Steps in order:
 
 2. Auto-categorize where possible:
    python3 /workspace/extra/kernel/categorize.py suggest
-   For each item in the "auto" bucket:
-   python3 /workspace/extra/kernel/categorize.py post {txn_id} {suggested_account} {credit_account}
+   Build a JSON array from the "auto" bucket and batch-post:
+   python3 /workspace/extra/kernel/categorize.py batch-post '<JSON>'
 
 3. Generate the audit PDF:
    python3 /workspace/extra/kernel/audit_pdf.py \\
@@ -425,13 +452,8 @@ async function handleSync(group: RegisteredGroup): Promise<string> {
     const output = await runKernel('ingest.py', ['sync', group.folder], group);
     return output || 'Sync complete.';
   } catch (err) {
-    logger.warn({ group: group.name, err }, 'slash /sync: error');
-    const msg = err instanceof Error ? err.message : String(err);
-    // Vault not yet configured is the most likely failure mode in early setup
-    if (msg.includes('SOLOLEDGER_MASTER_KEY') || msg.includes('vault')) {
-      return 'Sync requires the credential vault to be configured. Ask your admin to generate SOLOLEDGER_MASTER_KEY.';
-    }
-    return `Sync failed: ${msg}`;
+    logger.error({ group: group.name, err }, 'slash /sync: error');
+    return sanitizeKernelError(err);
   }
 }
 
@@ -453,7 +475,7 @@ async function handleBilling(group: RegisteredGroup): Promise<string> {
     return 'Billing portal is not configured. Contact support.';
   }
 
-  const returnUrl = PUBLIC_URL || 'https://sololedger.app';
+  const returnUrl = PUBLIC_URL || 'https://hirejudy.com';
   const stripe = new Stripe(key);
 
   try {
@@ -464,8 +486,31 @@ async function handleBilling(group: RegisteredGroup): Promise<string> {
     return `[Manage your subscription](${session.url})`;
   } catch (err) {
     logger.warn({ group: group.name, err }, 'slash /billing: Stripe error');
-    return `Could not generate billing link: ${err instanceof Error ? err.message : String(err)}`;
+    return 'Could not generate billing link. Please try again or contact support.';
   }
+}
+
+function handleAddAccount(group: RegisteredGroup): string {
+  const env = readEnvFile(['ONBOARDING_SECRET', 'PUBLIC_URL']);
+  const secret = env.ONBOARDING_SECRET;
+  const publicUrl = env.PUBLIC_URL || 'http://localhost:4000';
+
+  if (!secret) {
+    return 'Account linking is not configured. Contact support.';
+  }
+
+  // Sign: folder-expiryUnix-hmac (15 min TTL)
+  const expires = Math.floor(Date.now() / 1000) + 15 * 60;
+  const payload = `${group.folder}-${expires}`;
+  const hmac = crypto
+    .createHmac('sha256', secret)
+    .update(payload)
+    .digest('hex')
+    .slice(0, 16);
+  const token = `${payload}-${hmac}`;
+
+  const url = `${publicUrl}/add-account?token=${token}`;
+  return `To connect another bank or credit card, open this link:\n[Connect Account](${url})\n\nThis link expires in 15 minutes.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -473,29 +518,15 @@ async function handleBilling(group: RegisteredGroup): Promise<string> {
 // ---------------------------------------------------------------------------
 
 /**
- * Check whether the latest user message is a slash command and handle it.
- *
- * @param messages  Raw messages since last agent timestamp
- * @param group     The registered group being processed
- * @returns         Response string if handled, null if not a slash command
+ * Handle a slash command given the parsed command name and argument.
+ * Called from both the message-based flow and the Slack slash command webhook.
  */
-export async function handleSlashCommand(
-  messages: NewMessage[],
+export async function handleSlashCommandDirect(
+  cmd: string,
+  subArg: string | undefined,
   group: RegisteredGroup,
+  chatJid: string,
 ): Promise<string | null> {
-  // Find the last non-bot message
-  const lastUser = [...messages].reverse().find((m) => !m.is_bot_message);
-
-  if (!lastUser) return null;
-
-  const content = lastUser.content.trim();
-  if (!content.startsWith('/')) return null;
-
-  // Parse command and optional subcommand
-  const [rawCmd, subArg] = content.split(/\s+/, 2);
-  const cmd = rawCmd.toLowerCase();
-
-  logger.info({ group: group.name, cmd, subArg }, 'Slash command intercepted');
 
   // Main group only handles admin commands; all others fall through to the agent.
   if (group.isMain) {
@@ -503,11 +534,17 @@ export async function handleSlashCommand(
       case '/usage':
         return handleUsage();
       case '/close':
-        return handleClose(subArg, group, lastUser.chat_jid);
+        return handleClose(subArg, group, chatJid);
       case '/sync-weekly':
-        return handleSyncWeekly(subArg, group, lastUser.chat_jid);
+        return handleSyncWeekly(subArg, group, chatJid);
       case '/audit':
-        return handleAudit(subArg, group, lastUser.chat_jid);
+        return handleAudit(subArg, group, chatJid);
+      case '/addaccount': {
+        if (!subArg) return 'Usage: /addaccount <group_folder>';
+        const targetGroup = getRegisteredGroupByFolder(subArg);
+        if (!targetGroup) return `Group not found: ${subArg}`;
+        return handleAddAccount(targetGroup);
+      }
       default:
         return null;
     }
@@ -538,8 +575,33 @@ export async function handleSlashCommand(
     case '/pending':
       return handlePending(group);
 
+    case '/addaccount':
+      return handleAddAccount(group);
+
     default:
       // Unknown slash — let the agent handle it naturally
       return null;
   }
+}
+
+/**
+ * Check whether the latest user message is a slash command and handle it.
+ * Entry point from the NanoClaw message loop (Telegram, Slack DMs, etc.)
+ */
+export async function handleSlashCommand(
+  messages: NewMessage[],
+  group: RegisteredGroup,
+): Promise<string | null> {
+  const lastUser = [...messages].reverse().find((m) => !m.is_bot_message);
+  if (!lastUser) return null;
+
+  const content = lastUser.content.trim();
+  if (!content.startsWith('/')) return null;
+
+  const [rawCmd, subArg] = content.split(/\s+/, 2);
+  const cmd = rawCmd.toLowerCase();
+
+  logger.info({ group: group.name, cmd, subArg }, 'Slash command intercepted');
+
+  return handleSlashCommandDirect(cmd, subArg, group, lastUser.chat_jid);
 }

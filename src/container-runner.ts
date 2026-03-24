@@ -2,9 +2,12 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, exec, spawn } from 'child_process';
+import { ChildProcess, exec, execFile, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 import {
   CONTAINER_IMAGE,
@@ -14,6 +17,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  PYTHON_BIN,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -300,20 +304,63 @@ export async function runContainerAgent(
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
 
-  // Admin group only: inject kernel secrets so ingest.py can reach the vault and Plaid API.
-  // Customer group containers never receive SOLOLEDGER_MASTER_KEY — they would get the
-  // decrypted token by value when customer Plaid sync is implemented (see /add-account spec).
+  // Inject secrets needed for Plaid sync and kernel vault operations.
+  // Admin containers: full master key + Plaid API credentials.
+  // Customer containers: decrypted Plaid access token by value + API credentials.
+  //   No master key — container cannot access other customers' vault secrets.
   const extraEnv: Record<string, string> = {};
+  const kernelSecrets = readEnvFile([
+    'SOLOLEDGER_MASTER_KEY',
+    'PLAID_CLIENT_ID',
+    'PLAID_API_KEY_PROD',
+    'PLAID_API_KEY_TEST',
+    'PLAID_ENV',
+    'SOLOLEDGER_KERNEL_PATH',
+  ]);
   if (input.isMain) {
-    const kernelSecrets = readEnvFile([
-      'SOLOLEDGER_MASTER_KEY',
-      'PLAID_CLIENT_ID',
-      'PLAID_API_KEY_PROD',
-      'PLAID_API_KEY_TEST',
-      'PLAID_ENV',
-    ]);
     for (const [k, v] of Object.entries(kernelSecrets)) {
       if (v) extraEnv[k] = v;
+    }
+  } else {
+    // Inject Plaid API credentials (not the master key)
+    for (const k of ['PLAID_CLIENT_ID', 'PLAID_API_KEY_PROD', 'PLAID_API_KEY_TEST', 'PLAID_ENV']) {
+      if (kernelSecrets[k]) extraEnv[k] = kernelSecrets[k];
+    }
+    // Decrypt all Plaid access tokens from vault and inject as JSON
+    if (kernelSecrets.SOLOLEDGER_MASTER_KEY && kernelSecrets.SOLOLEDGER_KERNEL_PATH) {
+      try {
+        const { stdout } = await execFileAsync(PYTHON_BIN, [
+          '-c',
+          [
+            `import sys, json`,
+            `sys.path.insert(0, '${kernelSecrets.SOLOLEDGER_KERNEL_PATH}')`,
+            `import secrets`,
+            `tokens = secrets.list_secrets_by_prefix('${group.folder}', 'plaid_token_')`,
+            `result = {k.replace('plaid_token_', ''): v for k, v in tokens.items()}`,
+            `if not result:`,
+            `    legacy = secrets.get_secret('${group.folder}', 'plaid_access_token')`,
+            `    item = secrets.get_secret('${group.folder}', 'plaid_item_id')`,
+            `    if legacy: result = {item or 'ITEM': legacy}`,
+            `print(json.dumps(result))`,
+          ].join('; '),
+        ], {
+          env: { ...process.env, SOLOLEDGER_MASTER_KEY: kernelSecrets.SOLOLEDGER_MASTER_KEY },
+          timeout: 5000,
+        });
+        const tokensJson = stdout.trim();
+        const tokens = JSON.parse(tokensJson) as Record<string, string>;
+        const tokenValues = Object.values(tokens);
+        if (tokenValues.length > 0) {
+          extraEnv.PLAID_TOKENS_JSON = tokensJson;
+          extraEnv.PLAID_ACCESS_TOKEN = tokenValues[0]; // legacy compat
+          logger.debug(
+            { group: group.name, itemCount: tokenValues.length },
+            'Injected Plaid tokens into customer container',
+          );
+        }
+      } catch (err) {
+        logger.warn({ group: group.name, err }, 'Failed to decrypt Plaid tokens for customer container');
+      }
     }
   }
 

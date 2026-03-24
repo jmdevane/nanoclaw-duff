@@ -1,3 +1,4 @@
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
@@ -132,3 +133,7 @@ export const TELEGRAM_BOT_POOL = (
   .split(',')
   .map((t) => t.trim())
   .filter(Boolean);
+
+// Host Python binary — prefer venv (has plaid-python, cryptography, etc.)
+const _venvPython = path.resolve(process.cwd(), '..', 'venv', 'bin', 'python3');
+export const PYTHON_BIN = fs.existsSync(_venvPython) ? _venvPython : 'python3';

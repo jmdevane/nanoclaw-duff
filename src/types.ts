@@ -70,6 +70,7 @@ export interface ScheduledTask {
   status: 'active' | 'paused' | 'completed';
   created_at: string;
   model?: string; // Override model for this task (e.g. 'claude-haiku-4-5-20251001'). Falls back to env default.
+  max_turns?: number; // Override maxTurns for this task. Falls back to group containerConfig default.
   task_kind?: 'agent' | 'kernel_nudge'; // 'agent' (default): spawn container. 'kernel_nudge': direct kernel call, no LLM.
 }
 

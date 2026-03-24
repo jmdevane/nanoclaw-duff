@@ -49,7 +49,13 @@ import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { initBotPool, setStartCommandHandler } from './channels/telegram.js';
-import { handleTelegramStart, seedAllCustomerTasks, startOnboardingServer } from './onboarding.js';
+import { setSlackActivationHandler } from './channels/slack.js';
+import {
+  handleTelegramStart,
+  handleSlackActivation,
+  seedAllCustomerTasks,
+  startOnboardingServer,
+} from './onboarding.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   isSenderAllowed,
@@ -214,7 +220,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (profile?.subscription_status === 'past_due') {
       await channel.sendMessage(
         chatJid,
-        `There's an issue with your SoloLedger payment — your subscription is past due. Please update your payment method to keep your books running. Your data is safe and we'll be here when you're ready.`,
+        `There's an issue with your Judy payment — your subscription is past due. Please update your payment method to keep your books running. Your data is safe and we'll be here when you're ready.`,
       );
       return true;
     }
@@ -230,8 +236,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         }
       }
       const msg = resubUrl
-        ? `Your SoloLedger subscription has ended. [Reactivate here](${resubUrl}) — your books and history will be right where you left them.`
-        : `Your SoloLedger subscription has ended. Please contact support to reactivate.`;
+        ? `Your Judy subscription has ended. [Reactivate here](${resubUrl}) — your books and history will be right where you left them.`
+        : `Your Judy subscription has ended. Please contact support to reactivate.`;
       await channel.sendMessage(chatJid, msg);
       return true;
     }
@@ -641,6 +647,9 @@ async function main(): Promise<void> {
   };
   setStartCommandHandler((chatJid, token) =>
     handleTelegramStart(chatJid, token, onboardingDeps),
+  );
+  setSlackActivationHandler((chatJid, token) =>
+    handleSlackActivation(chatJid, token, onboardingDeps),
   );
   startOnboardingServer(onboardingDeps);
 
