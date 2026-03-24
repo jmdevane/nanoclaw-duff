@@ -142,6 +142,16 @@ function createSchema(database: Database.Database): void {
       created_at   TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_plaid_items_group ON plaid_items(group_folder);
+
+    CREATE TABLE IF NOT EXISTS user_feedback (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_folder TEXT NOT NULL,
+      chat_jid     TEXT NOT NULL,
+      message      TEXT NOT NULL,
+      status       TEXT NOT NULL DEFAULT 'new' CHECK(status IN ('new','reviewed','resolved')),
+      created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedback_status ON user_feedback(status);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -1198,4 +1208,53 @@ export function getUsageSummary(days = 30): Array<{
     cost_usd: number;
     query_count: number;
   }>;
+}
+
+// ── User Feedback ─────────────────────────────────────────────────────────────
+
+export interface UserFeedback {
+  id: number;
+  group_folder: string;
+  chat_jid: string;
+  message: string;
+  status: 'new' | 'reviewed' | 'resolved';
+  created_at: string;
+}
+
+export function submitFeedback(
+  groupFolder: string,
+  chatJid: string,
+  message: string,
+): void {
+  db.prepare(
+    `INSERT INTO user_feedback (group_folder, chat_jid, message) VALUES (?, ?, ?)`,
+  ).run(groupFolder, chatJid, message);
+}
+
+export function getFeedback(
+  status?: string,
+  limit = 20,
+): UserFeedback[] {
+  if (status) {
+    return db
+      .prepare(
+        `SELECT * FROM user_feedback WHERE status = ? ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(status, limit) as UserFeedback[];
+  }
+  return db
+    .prepare(
+      `SELECT * FROM user_feedback ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(limit) as UserFeedback[];
+}
+
+export function updateFeedbackStatus(
+  id: number,
+  status: 'new' | 'reviewed' | 'resolved',
+): boolean {
+  const result = db
+    .prepare(`UPDATE user_feedback SET status = ? WHERE id = ?`)
+    .run(status, id);
+  return result.changes > 0;
 }

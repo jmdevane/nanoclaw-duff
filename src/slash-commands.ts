@@ -28,8 +28,11 @@ import {
 import {
   createTask,
   getCustomerProfileByFolder,
+  getFeedback,
   getRegisteredGroupByFolder,
   getUsageSummary,
+  submitFeedback,
+  updateFeedbackStatus,
 } from './db.js';
 import { makeWeeklySyncPrompt, MONTHLY_CLOSE_PROMPT } from './onboarding.js';
 import { readEnvFile } from './env.js';
@@ -62,8 +65,8 @@ export const SLASH_COMMANDS: SlashCommandMeta[] = [
   },
   {
     command: '/report',
-    args: 'p&l | bs | cashflow',
-    description: 'Financial report — YTD by default',
+    args: '[p&l | bs | cashflow]',
+    description: 'Financial snapshot (or specific report)',
   },
   {
     command: '/undo',
@@ -99,6 +102,16 @@ export const SLASH_COMMANDS: SlashCommandMeta[] = [
     command: '/addaccount',
     args: '',
     description: 'Connect another bank or credit card',
+  },
+  {
+    command: '/tellus',
+    args: '<message>',
+    description: 'Send feedback, report an issue, or request a feature',
+  },
+  {
+    command: '/docs',
+    args: '',
+    description: 'Open the Judy documentation',
   },
 ];
 
@@ -225,10 +238,11 @@ async function handleReport(
     'balance-sheet': 'bs',
     cashflow: 'cashflow',
     cf: 'cashflow',
+    ytd: 'snapshot --ytd',
   };
-  const sub = subMap[subcommand?.toLowerCase() ?? ''] ?? 'pnl';
+  const sub = subMap[subcommand?.toLowerCase() ?? ''] ?? 'snapshot';
   try {
-    const output = await runKernel('report.py', [sub], group);
+    const output = await runKernel('report.py', sub.split(' '), group);
     return output ? '```\n' + output + '\n```' : 'No data for this period.';
   } catch (err) {
     logger.warn({ group: group.name, err }, `slash /report ${sub}: error`);
@@ -533,6 +547,58 @@ function handleAddAccount(group: RegisteredGroup): string {
   return `To connect another bank or credit card, open this link:\n[Connect Account](${url})\n\nThis link expires in 15 minutes.`;
 }
 
+function handleFeedbackSubmit(
+  subArg: string | undefined,
+  group: RegisteredGroup,
+  chatJid: string,
+): string {
+  if (!subArg || !subArg.trim()) {
+    return 'Usage: `/tellus <your message>` — tell us what you think, report a bug, or request a feature.';
+  }
+  submitFeedback(group.folder, chatJid, subArg.trim());
+  return 'Thanks for the feedback — logged and we\'ll review it shortly.';
+}
+
+function handleFeedbackAdmin(subArg: string | undefined): string {
+  // /feedback resolve 5 — mark feedback #5 as resolved
+  if (subArg) {
+    const resolveMatch = subArg.match(/^resolve\s+(\d+)$/i);
+    if (resolveMatch) {
+      const id = parseInt(resolveMatch[1], 10);
+      const ok = updateFeedbackStatus(id, 'resolved');
+      return ok ? `Feedback #${id} marked resolved.` : `Feedback #${id} not found.`;
+    }
+    const reviewMatch = subArg.match(/^review\s+(\d+)$/i);
+    if (reviewMatch) {
+      const id = parseInt(reviewMatch[1], 10);
+      const ok = updateFeedbackStatus(id, 'reviewed');
+      return ok ? `Feedback #${id} marked reviewed.` : `Feedback #${id} not found.`;
+    }
+  }
+
+  // Default: list recent feedback
+  const status = subArg?.trim() || undefined;
+  const validStatuses = ['new', 'reviewed', 'resolved'];
+  const items = getFeedback(
+    status && validStatuses.includes(status) ? status : undefined,
+    20,
+  );
+
+  if (items.length === 0) {
+    return status ? `No ${status} feedback.` : 'No feedback yet.';
+  }
+
+  const lines = [`*User feedback${status ? ` (${status})` : ''}:*`, ''];
+  for (const f of items) {
+    const date = f.created_at.slice(0, 10);
+    lines.push(`• #${f.id} [${f.status}] ${f.group_folder} (${date})`);
+    lines.push(`  ${f.message.slice(0, 100)}${f.message.length > 100 ? '…' : ''}`);
+  }
+  lines.push('');
+  lines.push('`/tellus resolve <id>` or `/tellus review <id>` to update status.');
+  return lines.join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -547,6 +613,14 @@ export async function handleSlashCommandDirect(
   group: RegisteredGroup,
   chatJid: string,
 ): Promise<string | null> {
+  // Universal commands — work for all groups (admin + customer)
+  switch (cmd) {
+    case '/help':
+      return handleHelp();
+    case '/docs':
+      return 'Recipes, guides, and tips: https://hirejudy.com/docs/';
+  }
+
   // Main group only handles admin commands; all others fall through to the agent.
   if (group.isMain) {
     switch (cmd) {
@@ -558,6 +632,8 @@ export async function handleSlashCommandDirect(
         return handleSyncWeekly(subArg, group, chatJid);
       case '/audit':
         return handleAudit(subArg, group, chatJid);
+      case '/tellus':
+        return handleFeedbackAdmin(subArg);
       case '/addaccount': {
         if (!subArg) return 'Usage: /addaccount <group_folder>';
         const targetGroup = getRegisteredGroupByFolder(subArg);
@@ -596,6 +672,12 @@ export async function handleSlashCommandDirect(
 
     case '/addaccount':
       return handleAddAccount(group);
+
+    case '/tellus':
+      return handleFeedbackSubmit(subArg, group, chatJid);
+
+    case '/docs':
+      return 'Recipes, guides, and tips: https://hirejudy.com/docs/';
 
     default:
       // Unknown slash — let the agent handle it naturally
