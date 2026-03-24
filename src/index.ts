@@ -502,6 +502,30 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
+
+          // Slash commands should short-circuit even when a container is active.
+          // For Slack: slash commands are handled by the webhook endpoint, so
+          // just advance the cursor and skip (don't pipe to container).
+          const lastUserMsg = [...messagesToSend].reverse().find(m => !m.is_bot_message);
+          const isSlashCmd = lastUserMsg?.content?.trim().startsWith('/') ?? false;
+
+          if (isSlashCmd && chatJid.startsWith('slack_')) {
+            // Webhook already handled it — just advance cursor
+            lastAgentTimestamp[chatJid] =
+              messagesToSend[messagesToSend.length - 1].timestamp;
+            saveState();
+            continue;
+          }
+
+          const slashResult = await handleSlashCommand(messagesToSend, group);
+          if (slashResult !== null) {
+            await channel.sendMessage(chatJid, slashResult);
+            lastAgentTimestamp[chatJid] =
+              messagesToSend[messagesToSend.length - 1].timestamp;
+            saveState();
+            continue;
+          }
+
           const formatted = formatMessages(messagesToSend, TIMEZONE);
 
           if (queue.sendMessage(chatJid, formatted)) {

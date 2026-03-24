@@ -1697,6 +1697,11 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
         .SLACK_SIGNING_SECRET;
       const rawBody = req.body as Buffer;
 
+      logger.info(
+        { bodyLen: rawBody?.length },
+        'Slack slash command: request received',
+      );
+
       // Signature verification
       if (signingSecret) {
         const timestamp = req.headers['x-slack-request-timestamp'] as
@@ -1706,6 +1711,7 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
           | string
           | undefined;
         if (!timestamp || !signature) {
+          logger.warn('Slack slash command: missing signature headers');
           res.status(400).send('Missing Slack signature headers');
           return;
         }
@@ -1729,6 +1735,7 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
           valid = false;
         }
         if (!valid) {
+          logger.warn('Slack slash command: invalid signature');
           res.status(400).send('Invalid signature');
           return;
         }

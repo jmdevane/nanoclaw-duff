@@ -155,6 +155,7 @@ async function runKernel(
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     LEDGER_DB: ledger,
+    LEDGER_DB_PATH: ledger,
     ...(secrets.SOLOLEDGER_MASTER_KEY
       ? { SOLOLEDGER_MASTER_KEY: secrets.SOLOLEDGER_MASTER_KEY }
       : {}),
@@ -247,8 +248,8 @@ async function handleUndo(group: RegisteredGroup): Promise<string> {
 
 async function handleAccounts(group: RegisteredGroup): Promise<string> {
   try {
-    const output = await runKernel('coa.py', ['list'], group);
-    return output ? '```\n' + output + '\n```' : 'No accounts found.';
+    const output = await runKernel('coa.py', ['tree'], group);
+    return output ? '```\n' + output + '\n```' : 'No accounts with activity yet.';
   } catch (err) {
     logger.warn({ group: group.name, err }, 'slash /accounts: error');
     return sanitizeKernelError(err);
@@ -597,8 +598,13 @@ export async function handleSlashCommand(
   const content = lastUser.content.trim();
   if (!content.startsWith('/')) return null;
 
+  // Slack slash commands are already handled by the webhook endpoint —
+  // skip them here to avoid duplicate responses.
+  if (lastUser.chat_jid.startsWith('slack_')) return null;
+
   const [rawCmd, subArg] = content.split(/\s+/, 2);
-  const cmd = rawCmd.toLowerCase();
+  // Telegram menu buttons append @botname (e.g. /accounts@solo_ledger_bot)
+  const cmd = rawCmd.replace(/@.*$/, '').toLowerCase();
 
   logger.info({ group: group.name, cmd, subArg }, 'Slash command intercepted');
 
