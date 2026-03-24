@@ -143,10 +143,15 @@ async function runTask(
   // Subscription gate — skip scheduled tasks for non-active customer groups.
   // Groups without a customer_profiles row (e.g. operator group) always proceed.
   // Onboarding tasks (audit + recipe) bypass — they're part of the free trial.
-  const isOnboardingTask = task.schedule_type === 'once' &&
+  const isOnboardingTask =
+    task.schedule_type === 'once' &&
     (task.id.startsWith('audit-') || task.id.startsWith('recipe-'));
   const profile = getCustomerProfileByFolder(task.group_folder);
-  if (profile && profile.subscription_status !== 'active' && !isOnboardingTask) {
+  if (
+    profile &&
+    profile.subscription_status !== 'active' &&
+    !isOnboardingTask
+  ) {
     logger.info(
       {
         taskId: task.id,

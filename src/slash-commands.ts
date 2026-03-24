@@ -527,7 +527,6 @@ export async function handleSlashCommandDirect(
   group: RegisteredGroup,
   chatJid: string,
 ): Promise<string | null> {
-
   // Main group only handles admin commands; all others fall through to the agent.
   if (group.isMain) {
     switch (cmd) {

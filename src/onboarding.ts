@@ -788,7 +788,10 @@ export async function handleSlackActivation(
       session.plaid_item_id || '',
     );
   } catch (err) {
-    logger.error({ chatJid, err }, 'provision.py failed during Slack activation');
+    logger.error(
+      { chatJid, err },
+      'provision.py failed during Slack activation',
+    );
     await deps.sendMessage(
       chatJid,
       'There was an issue setting up your account. Please contact support.',
@@ -1601,13 +1604,18 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
     express.raw({ type: 'application/json' }),
     (req: Request, res: Response) => {
       const s = secrets();
-      const signingSecret = (s as Record<string, string | undefined>).SLACK_SIGNING_SECRET;
+      const signingSecret = (s as Record<string, string | undefined>)
+        .SLACK_SIGNING_SECRET;
       const rawBody = req.body as Buffer;
 
       // Signature verification (skip if secret not yet configured)
       if (signingSecret) {
-        const timestamp = req.headers['x-slack-request-timestamp'] as string | undefined;
-        const signature = req.headers['x-slack-signature'] as string | undefined;
+        const timestamp = req.headers['x-slack-request-timestamp'] as
+          | string
+          | undefined;
+        const signature = req.headers['x-slack-signature'] as
+          | string
+          | undefined;
 
         if (!timestamp || !signature) {
           logger.warn('Slack webhook: missing timestamp or signature headers');
@@ -1618,7 +1626,9 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
         // Replay attack guard: reject requests older than 5 minutes
         const tsNum = parseInt(timestamp, 10);
         if (Math.abs(Date.now() / 1000 - tsNum) > 300) {
-          logger.warn('Slack webhook: timestamp too old, possible replay attack');
+          logger.warn(
+            'Slack webhook: timestamp too old, possible replay attack',
+          );
           res.status(400).send('Request too old');
           return;
         }
@@ -1646,7 +1656,9 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
           return;
         }
       } else {
-        logger.warn('Slack webhook: SLACK_SIGNING_SECRET not set — skipping signature check');
+        logger.warn(
+          'Slack webhook: SLACK_SIGNING_SECRET not set — skipping signature check',
+        );
       }
 
       let body: Record<string, unknown>;
@@ -1681,13 +1693,18 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
     express.raw({ type: 'application/x-www-form-urlencoded' }),
     async (req: Request, res: Response) => {
       const s = secrets();
-      const signingSecret = (s as Record<string, string | undefined>).SLACK_SIGNING_SECRET;
+      const signingSecret = (s as Record<string, string | undefined>)
+        .SLACK_SIGNING_SECRET;
       const rawBody = req.body as Buffer;
 
       // Signature verification
       if (signingSecret) {
-        const timestamp = req.headers['x-slack-request-timestamp'] as string | undefined;
-        const signature = req.headers['x-slack-signature'] as string | undefined;
+        const timestamp = req.headers['x-slack-request-timestamp'] as
+          | string
+          | undefined;
+        const signature = req.headers['x-slack-signature'] as
+          | string
+          | undefined;
         if (!timestamp || !signature) {
           res.status(400).send('Missing Slack signature headers');
           return;
@@ -1697,12 +1714,20 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
           return;
         }
         const baseString = `v0:${timestamp}:${rawBody.toString('utf8')}`;
-        const hmac = crypto.createHmac('sha256', signingSecret).update(baseString).digest('hex');
+        const hmac = crypto
+          .createHmac('sha256', signingSecret)
+          .update(baseString)
+          .digest('hex');
         const computed = `v0=${hmac}`;
         let valid = false;
         try {
-          valid = crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signature));
-        } catch { valid = false; }
+          valid = crypto.timingSafeEqual(
+            Buffer.from(computed),
+            Buffer.from(signature),
+          );
+        } catch {
+          valid = false;
+        }
         if (!valid) {
           res.status(400).send('Invalid signature');
           return;
@@ -1711,8 +1736,8 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
 
       // Parse URL-encoded body
       const params = new URLSearchParams(rawBody.toString('utf8'));
-      const command = params.get('command') || '';   // e.g. "/help"
-      const text = params.get('text') || '';          // e.g. "p&l" for "/report p&l"
+      const command = params.get('command') || ''; // e.g. "/help"
+      const text = params.get('text') || ''; // e.g. "p&l" for "/report p&l"
       const channelId = params.get('channel_id') || '';
       const responseUrl = params.get('response_url') || '';
 
@@ -1729,11 +1754,17 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
       const group = getAllRegisteredGroups()[jid];
       if (!group) {
         // Respond ephemerally — only the user sees this
-        res.json({ response_type: 'ephemeral', text: 'This channel is not registered with Judy.' });
+        res.json({
+          response_type: 'ephemeral',
+          text: 'This channel is not registered with Judy.',
+        });
         return;
       }
 
-      logger.info({ group: group.name, cmd, subArg, channelId }, 'Slack slash command received');
+      logger.info(
+        { group: group.name, cmd, subArg, channelId },
+        'Slack slash command received',
+      );
 
       try {
         const result = await handleSlashCommandDirect(cmd, subArg, group, jid);
@@ -1741,11 +1772,20 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
           // For long results (reports, account lists), use in_channel so it's visible
           res.json({ response_type: 'in_channel', text: result });
         } else {
-          res.json({ response_type: 'ephemeral', text: `Unknown command: ${command}` });
+          res.json({
+            response_type: 'ephemeral',
+            text: `Unknown command: ${command}`,
+          });
         }
       } catch (err) {
-        logger.error({ err, cmd, group: group.name }, 'Slack slash command error');
-        res.json({ response_type: 'ephemeral', text: 'Something went wrong. Try again.' });
+        logger.error(
+          { err, cmd, group: group.name },
+          'Slack slash command error',
+        );
+        res.json({
+          response_type: 'ephemeral',
+          text: 'Something went wrong. Try again.',
+        });
       }
     },
   );
@@ -1874,11 +1914,17 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
 
       let responsePayload: Record<string, string>;
       if (selectedChannel === 'slack') {
-        const slackClientId = (s as Record<string, string | undefined>).SLACK_CLIENT_ID || '';
+        const slackClientId =
+          (s as Record<string, string | undefined>).SLACK_CLIENT_ID || '';
         const slackInstallUrl = slackClientId
           ? `https://slack.com/oauth/v2/authorize?client_id=${slackClientId}&scope=chat:write,im:history,im:read,im:write&user_scope=`
           : '';
-        responsePayload = { slackCode: token, slackInstallUrl, folder, sessionId };
+        responsePayload = {
+          slackCode: token,
+          slackInstallUrl,
+          folder,
+          sessionId,
+        };
         logger.info(
           { sessionId, folder, institution, channel: 'slack' },
           'Onboarding session created',
@@ -1927,7 +1973,12 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
       .slice(0, 16);
 
     try {
-      if (!crypto.timingSafeEqual(Buffer.from(hmac, 'hex'), Buffer.from(expectedHmac, 'hex'))) {
+      if (
+        !crypto.timingSafeEqual(
+          Buffer.from(hmac, 'hex'),
+          Buffer.from(expectedHmac, 'hex'),
+        )
+      ) {
         return null;
       }
     } catch {
@@ -1946,11 +1997,18 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
       res.status(400).send('Missing token');
       return;
     }
-    logger.info({ token, tokenLength: token.length }, '/add-account token received');
+    logger.info(
+      { token, tokenLength: token.length },
+      '/add-account token received',
+    );
     const parsed = verifyAddAccountToken(token);
     if (!parsed) {
       logger.warn({ token }, '/add-account token verification failed');
-      res.status(403).send('Invalid or expired link. Send /addaccount again to get a new one.');
+      res
+        .status(403)
+        .send(
+          'Invalid or expired link. Send /addaccount again to get a new one.',
+        );
       return;
     }
 
@@ -2059,110 +2117,135 @@ export function startOnboardingServer(deps: OnboardingDeps): void {
 </html>`);
   });
 
-  app.post('/plaid/exchange-additional', async (req: Request, res: Response) => {
-    const { public_token, folder, token, institution } = req.body as {
-      public_token?: string;
-      folder?: string;
-      token?: string;
-      institution?: string;
-    };
+  app.post(
+    '/plaid/exchange-additional',
+    async (req: Request, res: Response) => {
+      const { public_token, folder, token, institution } = req.body as {
+        public_token?: string;
+        folder?: string;
+        token?: string;
+        institution?: string;
+      };
 
-    if (!public_token || !folder || !token) {
-      res.status(400).json({ error: 'Missing required fields' });
-      return;
-    }
-
-    // Verify HMAC token
-    const parsed = verifyAddAccountToken(token);
-    if (!parsed || parsed.folder !== folder) {
-      res.status(403).json({ error: 'Invalid or expired token' });
-      return;
-    }
-
-    // Verify group exists
-    const group = getRegisteredGroupByFolder(folder);
-    if (!group) {
-      res.status(404).json({ error: 'Group not found' });
-      return;
-    }
-
-    try {
-      const plaid = makePlaidClient();
-      const exchange = await plaid.itemPublicTokenExchange({ public_token });
-      const accessToken = exchange.data.access_token;
-      const itemId = exchange.data.item_id;
-
-      // Store token in vault as plaid_token_{item_id}
-      const s2 = secrets();
-      const kernelPath = readEnvFile(['SOLOLEDGER_KERNEL_PATH']).SOLOLEDGER_KERNEL_PATH;
-      if (kernelPath && s2.SOLOLEDGER_MASTER_KEY) {
-        try {
-          await execFileAsync(PYTHON_BIN, [
-            '-c',
-            `import sys, os; sys.path.insert(0, os.environ['KERNEL_PATH']); import secrets; secrets.set_secret(os.environ['FOLDER'], 'plaid_token_' + os.environ['ITEM_ID'], os.environ['TOKEN'])`,
-          ], {
-            env: {
-              ...process.env,
-              SOLOLEDGER_MASTER_KEY: s2.SOLOLEDGER_MASTER_KEY,
-              KERNEL_PATH: kernelPath,
-              FOLDER: folder,
-              ITEM_ID: itemId,
-              TOKEN: accessToken,
-            },
-            timeout: 5000,
-          });
-          logger.info({ folder, itemId }, 'Plaid token stored in vault');
-        } catch (err) {
-          logger.error({ err, folder, itemId }, 'Failed to store Plaid token in vault');
-        }
+      if (!public_token || !folder || !token) {
+        res.status(400).json({ error: 'Missing required fields' });
+        return;
       }
 
-      // Insert plaid_items row
-      addPlaidItem(itemId, folder, institution || undefined);
+      // Verify HMAC token
+      const parsed = verifyAddAccountToken(token);
+      if (!parsed || parsed.folder !== folder) {
+        res.status(403).json({ error: 'Invalid or expired token' });
+        return;
+      }
 
-      // Register webhook
-      const webhookUrl = `${PUBLIC_URL}/webhooks/plaid`;
+      // Verify group exists
+      const group = getRegisteredGroupByFolder(folder);
+      if (!group) {
+        res.status(404).json({ error: 'Group not found' });
+        return;
+      }
+
       try {
-        await plaid.itemWebhookUpdate({
-          access_token: accessToken,
-          webhook: webhookUrl,
-        });
-      } catch (err) {
-        logger.warn({ err, webhookUrl, itemId }, 'Failed to register Plaid webhook for additional account');
-      }
+        const plaid = makePlaidClient();
+        const exchange = await plaid.itemPublicTokenExchange({ public_token });
+        const accessToken = exchange.data.access_token;
+        const itemId = exchange.data.item_id;
 
-      // Auto-link accounts
-      if (kernelPath) {
+        // Store token in vault as plaid_token_{item_id}
+        const s2 = secrets();
+        const kernelPath = readEnvFile([
+          'SOLOLEDGER_KERNEL_PATH',
+        ]).SOLOLEDGER_KERNEL_PATH;
+        if (kernelPath && s2.SOLOLEDGER_MASTER_KEY) {
+          try {
+            await execFileAsync(
+              PYTHON_BIN,
+              [
+                '-c',
+                `import sys, os; sys.path.insert(0, os.environ['KERNEL_PATH']); import secrets; secrets.set_secret(os.environ['FOLDER'], 'plaid_token_' + os.environ['ITEM_ID'], os.environ['TOKEN'])`,
+              ],
+              {
+                env: {
+                  ...process.env,
+                  SOLOLEDGER_MASTER_KEY: s2.SOLOLEDGER_MASTER_KEY,
+                  KERNEL_PATH: kernelPath,
+                  FOLDER: folder,
+                  ITEM_ID: itemId,
+                  TOKEN: accessToken,
+                },
+                timeout: 5000,
+              },
+            );
+            logger.info({ folder, itemId }, 'Plaid token stored in vault');
+          } catch (err) {
+            logger.error(
+              { err, folder, itemId },
+              'Failed to store Plaid token in vault',
+            );
+          }
+        }
+
+        // Insert plaid_items row
+        addPlaidItem(itemId, folder, institution || undefined);
+
+        // Register webhook
+        const webhookUrl = `${PUBLIC_URL}/webhooks/plaid`;
         try {
-          const linkArgs = ['link-accounts', folder, '--institution', institution || ''];
-          await execFileAsync(PYTHON_BIN, [
-            `${kernelPath}/ingest.py`, ...linkArgs,
-          ], {
-            env: {
-              ...process.env,
-              PLAID_ACCESS_TOKEN: accessToken,
-              PLAID_CLIENT_ID: s2.PLAID_CLIENT_ID || '',
-              PLAID_API_KEY_PROD: s2.PLAID_API_KEY_PROD || '',
-              PLAID_API_KEY_TEST: s2.PLAID_API_KEY_TEST || '',
-            },
-            timeout: 15000,
+          await plaid.itemWebhookUpdate({
+            access_token: accessToken,
+            webhook: webhookUrl,
           });
         } catch (err) {
-          logger.warn({ err, folder }, 'Auto-link accounts failed — will be linked on next sync');
+          logger.warn(
+            { err, webhookUrl, itemId },
+            'Failed to register Plaid webhook for additional account',
+          );
         }
+
+        // Auto-link accounts
+        if (kernelPath) {
+          try {
+            const linkArgs = [
+              'link-accounts',
+              folder,
+              '--institution',
+              institution || '',
+            ];
+            await execFileAsync(
+              PYTHON_BIN,
+              [`${kernelPath}/ingest.py`, ...linkArgs],
+              {
+                env: {
+                  ...process.env,
+                  PLAID_ACCESS_TOKEN: accessToken,
+                  PLAID_CLIENT_ID: s2.PLAID_CLIENT_ID || '',
+                  PLAID_API_KEY_PROD: s2.PLAID_API_KEY_PROD || '',
+                  PLAID_API_KEY_TEST: s2.PLAID_API_KEY_TEST || '',
+                },
+                timeout: 15000,
+              },
+            );
+          } catch (err) {
+            logger.warn(
+              { err, folder },
+              'Auto-link accounts failed — will be linked on next sync',
+            );
+          }
+        }
+
+        logger.info(
+          { folder, itemId, institution },
+          'Additional Plaid account connected',
+        );
+
+        res.json({ ok: true, itemId, institution });
+      } catch (err) {
+        logger.error({ err, folder }, 'Plaid exchange-additional failed');
+        res.status(500).json({ error: String(err) });
       }
-
-      logger.info(
-        { folder, itemId, institution },
-        'Additional Plaid account connected',
-      );
-
-      res.json({ ok: true, itemId, institution });
-    } catch (err) {
-      logger.error({ err, folder }, 'Plaid exchange-additional failed');
-      res.status(500).json({ error: String(err) });
-    }
-  });
+    },
+  );
 
   // Stripe checkout result pages
   app.get('/checkout/success', (_req: Request, res: Response) => {

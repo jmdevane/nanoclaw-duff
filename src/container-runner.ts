@@ -323,30 +323,45 @@ export async function runContainerAgent(
     }
   } else {
     // Inject Plaid API credentials (not the master key)
-    for (const k of ['PLAID_CLIENT_ID', 'PLAID_API_KEY_PROD', 'PLAID_API_KEY_TEST', 'PLAID_ENV']) {
+    for (const k of [
+      'PLAID_CLIENT_ID',
+      'PLAID_API_KEY_PROD',
+      'PLAID_API_KEY_TEST',
+      'PLAID_ENV',
+    ]) {
       if (kernelSecrets[k]) extraEnv[k] = kernelSecrets[k];
     }
     // Decrypt all Plaid access tokens from vault and inject as JSON
-    if (kernelSecrets.SOLOLEDGER_MASTER_KEY && kernelSecrets.SOLOLEDGER_KERNEL_PATH) {
+    if (
+      kernelSecrets.SOLOLEDGER_MASTER_KEY &&
+      kernelSecrets.SOLOLEDGER_KERNEL_PATH
+    ) {
       try {
-        const { stdout } = await execFileAsync(PYTHON_BIN, [
-          '-c',
+        const { stdout } = await execFileAsync(
+          PYTHON_BIN,
           [
-            `import sys, json`,
-            `sys.path.insert(0, '${kernelSecrets.SOLOLEDGER_KERNEL_PATH}')`,
-            `import secrets`,
-            `tokens = secrets.list_secrets_by_prefix('${group.folder}', 'plaid_token_')`,
-            `result = {k.replace('plaid_token_', ''): v for k, v in tokens.items()}`,
-            `if not result:`,
-            `    legacy = secrets.get_secret('${group.folder}', 'plaid_access_token')`,
-            `    item = secrets.get_secret('${group.folder}', 'plaid_item_id')`,
-            `    if legacy: result = {item or 'ITEM': legacy}`,
-            `print(json.dumps(result))`,
-          ].join('; '),
-        ], {
-          env: { ...process.env, SOLOLEDGER_MASTER_KEY: kernelSecrets.SOLOLEDGER_MASTER_KEY },
-          timeout: 5000,
-        });
+            '-c',
+            [
+              `import sys, json`,
+              `sys.path.insert(0, '${kernelSecrets.SOLOLEDGER_KERNEL_PATH}')`,
+              `import secrets`,
+              `tokens = secrets.list_secrets_by_prefix('${group.folder}', 'plaid_token_')`,
+              `result = {k.replace('plaid_token_', ''): v for k, v in tokens.items()}`,
+              `if not result:`,
+              `    legacy = secrets.get_secret('${group.folder}', 'plaid_access_token')`,
+              `    item = secrets.get_secret('${group.folder}', 'plaid_item_id')`,
+              `    if legacy: result = {item or 'ITEM': legacy}`,
+              `print(json.dumps(result))`,
+            ].join('; '),
+          ],
+          {
+            env: {
+              ...process.env,
+              SOLOLEDGER_MASTER_KEY: kernelSecrets.SOLOLEDGER_MASTER_KEY,
+            },
+            timeout: 5000,
+          },
+        );
         const tokensJson = stdout.trim();
         const tokens = JSON.parse(tokensJson) as Record<string, string>;
         const tokenValues = Object.values(tokens);
@@ -359,7 +374,10 @@ export async function runContainerAgent(
           );
         }
       } catch (err) {
-        logger.warn({ group: group.name, err }, 'Failed to decrypt Plaid tokens for customer container');
+        logger.warn(
+          { group: group.name, err },
+          'Failed to decrypt Plaid tokens for customer container',
+        );
       }
     }
   }

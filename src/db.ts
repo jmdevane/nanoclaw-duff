@@ -197,9 +197,7 @@ function createSchema(database: Database.Database): void {
 
   // Add max_turns column if it doesn't exist (migration for existing DBs)
   try {
-    database.exec(
-      `ALTER TABLE scheduled_tasks ADD COLUMN max_turns INTEGER`,
-    );
+    database.exec(`ALTER TABLE scheduled_tasks ADD COLUMN max_turns INTEGER`);
   } catch {
     /* column already exists */
   }
