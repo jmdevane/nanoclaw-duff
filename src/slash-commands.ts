@@ -239,7 +239,9 @@ async function handleReport(
 async function handleUndo(group: RegisteredGroup): Promise<string> {
   try {
     const output = await runKernel('reverse.py', ['last'], group);
-    return output || 'Nothing to undo.';
+    if (!output) return 'Nothing to undo.';
+    if (output.startsWith('OK:')) return 'Done — last categorization reversed.';
+    return output;
   } catch (err) {
     logger.warn({ group: group.name, err }, 'slash /undo: error');
     return sanitizeKernelError(err);
@@ -249,7 +251,9 @@ async function handleUndo(group: RegisteredGroup): Promise<string> {
 async function handleAccounts(group: RegisteredGroup): Promise<string> {
   try {
     const output = await runKernel('coa.py', ['tree'], group);
-    return output ? '```\n' + output + '\n```' : 'No accounts with activity yet.';
+    return output
+      ? '```\n' + output + '\n```'
+      : 'No accounts with activity yet.';
   } catch (err) {
     logger.warn({ group: group.name, err }, 'slash /accounts: error');
     return sanitizeKernelError(err);
@@ -451,7 +455,22 @@ function handleUsage(): string {
 async function handleSync(group: RegisteredGroup): Promise<string> {
   try {
     const output = await runKernel('ingest.py', ['sync', group.folder], group);
-    return output || 'Sync complete.';
+    // Parse kernel output into a customer-friendly message
+    const addedMatch = output.match(/\+(\d+) added/);
+    const modifiedMatch = output.match(/~(\d+) modified/);
+    const removedMatch = output.match(/-(\d+) removed/);
+    const added = parseInt(addedMatch?.[1] ?? '0', 10);
+    const modified = parseInt(modifiedMatch?.[1] ?? '0', 10);
+    const removed = parseInt(removedMatch?.[1] ?? '0', 10);
+
+    if (added === 0 && modified === 0 && removed === 0) {
+      return 'All caught up — no new transactions.';
+    }
+    const parts: string[] = [];
+    if (added > 0) parts.push(`${added} new`);
+    if (modified > 0) parts.push(`${modified} updated`);
+    if (removed > 0) parts.push(`${removed} removed`);
+    return `Sync complete: ${parts.join(', ')} transaction${added + modified + removed === 1 ? '' : 's'}.`;
   } catch (err) {
     logger.error({ group: group.name, err }, 'slash /sync: error');
     return sanitizeKernelError(err);
