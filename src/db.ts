@@ -1231,10 +1231,7 @@ export function submitFeedback(
   ).run(groupFolder, chatJid, message);
 }
 
-export function getFeedback(
-  status?: string,
-  limit = 20,
-): UserFeedback[] {
+export function getFeedback(status?: string, limit = 20): UserFeedback[] {
   if (status) {
     return db
       .prepare(
@@ -1243,9 +1240,7 @@ export function getFeedback(
       .all(status, limit) as UserFeedback[];
   }
   return db
-    .prepare(
-      `SELECT * FROM user_feedback ORDER BY created_at DESC LIMIT ?`,
-    )
+    .prepare(`SELECT * FROM user_feedback ORDER BY created_at DESC LIMIT ?`)
     .all(limit) as UserFeedback[];
 }
 

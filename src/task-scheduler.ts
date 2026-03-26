@@ -7,6 +7,7 @@ import { promisify } from 'util';
 import {
   ASSISTANT_NAME,
   GROUPS_DIR,
+  PYTHON_BIN,
   SCHEDULER_POLL_INTERVAL,
   TIMEZONE,
 } from './config.js';
@@ -186,13 +187,14 @@ async function runTask(
       const execEnv: NodeJS.ProcessEnv = {
         ...process.env,
         LEDGER_DB: ledger,
+        LEDGER_DB_PATH: ledger,
         ...(env.SOLOLEDGER_MASTER_KEY
           ? { SOLOLEDGER_MASTER_KEY: env.SOLOLEDGER_MASTER_KEY }
           : {}),
       };
 
       const { stdout } = await execFileAsync(
-        'python3',
+        PYTHON_BIN,
         [path.join(kernelDir, 'categorize.py'), 'pending', '--json'],
         { env: execEnv, timeout: 30_000 },
       );

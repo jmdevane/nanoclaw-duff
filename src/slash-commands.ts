@@ -556,7 +556,7 @@ function handleFeedbackSubmit(
     return 'Usage: `/tellus <your message>` — tell us what you think, report a bug, or request a feature.';
   }
   submitFeedback(group.folder, chatJid, subArg.trim());
-  return 'Thanks for the feedback — logged and we\'ll review it shortly.';
+  return "Thanks for the feedback — logged and we'll review it shortly.";
 }
 
 function handleFeedbackAdmin(subArg: string | undefined): string {
@@ -566,13 +566,17 @@ function handleFeedbackAdmin(subArg: string | undefined): string {
     if (resolveMatch) {
       const id = parseInt(resolveMatch[1], 10);
       const ok = updateFeedbackStatus(id, 'resolved');
-      return ok ? `Feedback #${id} marked resolved.` : `Feedback #${id} not found.`;
+      return ok
+        ? `Feedback #${id} marked resolved.`
+        : `Feedback #${id} not found.`;
     }
     const reviewMatch = subArg.match(/^review\s+(\d+)$/i);
     if (reviewMatch) {
       const id = parseInt(reviewMatch[1], 10);
       const ok = updateFeedbackStatus(id, 'reviewed');
-      return ok ? `Feedback #${id} marked reviewed.` : `Feedback #${id} not found.`;
+      return ok
+        ? `Feedback #${id} marked reviewed.`
+        : `Feedback #${id} not found.`;
     }
   }
 
@@ -592,10 +596,14 @@ function handleFeedbackAdmin(subArg: string | undefined): string {
   for (const f of items) {
     const date = f.created_at.slice(0, 10);
     lines.push(`• #${f.id} [${f.status}] ${f.group_folder} (${date})`);
-    lines.push(`  ${f.message.slice(0, 100)}${f.message.length > 100 ? '…' : ''}`);
+    lines.push(
+      `  ${f.message.slice(0, 100)}${f.message.length > 100 ? '…' : ''}`,
+    );
   }
   lines.push('');
-  lines.push('`/tellus resolve <id>` or `/tellus review <id>` to update status.');
+  lines.push(
+    '`/tellus resolve <id>` or `/tellus review <id>` to update status.',
+  );
   return lines.join('\n');
 }
 

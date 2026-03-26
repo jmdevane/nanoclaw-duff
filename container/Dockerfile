@@ -31,6 +31,8 @@ RUN apt-get update && apt-get install -y \
         beancount==2.3.6 reportlab \
         matplotlib \
         plaid-python \
+        lxml cssselect2 tinycss2 \
+    && pip3 install --no-cache-dir --break-system-packages --no-deps svglib \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
